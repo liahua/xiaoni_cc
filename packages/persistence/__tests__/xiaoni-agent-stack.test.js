@@ -1965,3 +1965,41 @@ test('getXiaoniLlmUsageTimeline searches Codex Provider usage events', async () 
   assert.equal(timeline.overlays.searchHits[0].anchorEventId, 'codex-provider:vision-1');
   assert.ok(sql.calls.some((call) => call.kind === 'query' && call.sql.includes('FROM codex_provider_usage_events')));
 });
+
+test('reapOrphanedForkRuns fails every running fork-run row across all three ledgers', async () => {
+  const calls = [];
+  const adapter = {
+    execute: async (sql, params = []) => { calls.push({ kind: 'execute', sql, params }); return 1; },
+    query: async (sql, params = []) => {
+      calls.push({ kind: 'query', sql, params });
+      if (/UPDATE\s+core_memory_compression_fork_runs[\s\S]*RETURNING/i.test(sql)) {
+        return [{ fork_run_id: 'cm-zombie-1' }, { fork_run_id: 'cm-zombie-2' }];
+      }
+      if (/UPDATE\s+subconscious_agent_fork_runs[\s\S]*RETURNING/i.test(sql)) {
+        return [{ fork_run_id: 'sub-zombie-1' }];
+      }
+      if (/UPDATE\s+image_vision_fork_runs[\s\S]*RETURNING/i.test(sql)) {
+        return [];
+      }
+      return [];
+    }
+  };
+  const persistence = createXiaoniAgentStackPersistence({ sqlAdapter: adapter });
+
+  const result = await persistence.reapOrphanedForkRuns({ reason: 'orphaned_on_agent_service_restart' });
+
+  assert.deepEqual(result.coreMemoryCompression, ['cm-zombie-1', 'cm-zombie-2']);
+  assert.deepEqual(result.subconscious, ['sub-zombie-1']);
+  assert.deepEqual(result.imageVision, []);
+  assert.equal(result.total, 3);
+
+  const reapUpdates = calls.filter((call) =>
+    call.kind === 'query' && /UPDATE\s+\w+_fork_runs/i.test(call.sql) && /RETURNING/i.test(call.sql));
+  assert.equal(reapUpdates.length, 3, 'reaps exactly the three fork-run ledgers');
+  for (const update of reapUpdates) {
+    assert.match(update.sql, /status = 'failed'/);
+    assert.match(update.sql, /WHERE\s+identity_key = \?/);
+    assert.match(update.sql, /AND\s+status = 'running'/);
+    assert.equal(update.params[update.params.length - 1], 'xiaoni');
+  }
+});

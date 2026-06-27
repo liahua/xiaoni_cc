@@ -2637,6 +2637,49 @@ function createXiaoniAgentStackPersistence({ createSqlAdapter, sqlAdapter } = {}
     });
   }
 
+  // All three fork-run families (core-memory compression, subconscious agent,
+  // image vision) are in-memory fire-and-forget promises in agent-service. A
+  // process restart kills them mid-run, leaving their durable row stuck at
+  // status='running'. For core-memory compression that zombie blocks a fresh
+  // manual 压缩记忆 for 30min (findActiveCoreMemoryCompressionForkRun treats a
+  // recent running row as live). Since agent-service is single-instance, any
+  // running row at our own startup is necessarily orphaned: reap it to failed.
+  async function reapOrphanedForkRuns(input = {}, config = {}) {
+    await ensureXiaoniAgentStackSchema(input, config);
+    const identityKey = firstString(input.identityKey, input.identity_key, 'xiaoni');
+    const reason = firstString(input.reason, 'orphaned_on_startup');
+    const tables = [
+      { table: 'core_memory_compression_fork_runs', key: 'coreMemoryCompression' },
+      { table: 'subconscious_agent_fork_runs', key: 'subconscious' },
+      { table: 'image_vision_fork_runs', key: 'imageVision' }
+    ];
+    return withSql(input, config, async (sql) => {
+      const result = { coreMemoryCompression: [], subconscious: [], imageVision: [], total: 0 };
+      for (const { table, key } of tables) {
+        const rows = await sql.query(
+          `
+            UPDATE ${table}
+            SET status = 'failed',
+                completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP),
+                error_message = COALESCE(error_message, ?),
+                metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{abort_reason}', to_jsonb(?::text), true),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE identity_key = ?
+              AND status = 'running'
+            RETURNING fork_run_id
+          `,
+          [reason, reason, identityKey]
+        );
+        const forkRunIds = (rows || [])
+          .map((row) => firstString(row.fork_run_id, row.forkRunId))
+          .filter(Boolean);
+        result[key] = forkRunIds;
+        result.total += forkRunIds.length;
+      }
+      return result;
+    });
+  }
+
   async function recordSubconsciousAgentForkRun(input = {}, config = {}) {
     await ensureXiaoniAgentStackSchema(input, config);
     const forkRunId = buildSubconsciousForkRunId(input);
@@ -4602,6 +4645,7 @@ function createXiaoniAgentStackPersistence({ createSqlAdapter, sqlAdapter } = {}
     recordCoreMemoryCompressionForkRun,
     completeCoreMemoryCompressionForkRun,
     findActiveCoreMemoryCompressionForkRun,
+    reapOrphanedForkRuns,
     appendCoreMemoryCompressionForkItems,
     recordCoreMemoryCompressionForkSlice,
     recordCoreMemoryCompressionForkToolExecution,
