@@ -22,6 +22,7 @@ import {
   recordCoreMemoryCompressionForkRun as recordCoreMemoryCompressionForkRunPersistence,
   completeCoreMemoryCompressionForkRun as completeCoreMemoryCompressionForkRunPersistence,
   findActiveCoreMemoryCompressionForkRun as findActiveCoreMemoryCompressionForkRunPersistence,
+  reapOrphanedForkRuns as reapOrphanedForkRunsPersistence,
   appendCoreMemoryCompressionForkItems as appendCoreMemoryCompressionForkItemsPersistence,
   recordCoreMemoryCompressionForkSlice as recordCoreMemoryCompressionForkSlicePersistence,
   recordCoreMemoryCompressionForkToolExecution as recordCoreMemoryCompressionForkToolExecutionPersistence,
@@ -2144,6 +2145,17 @@ export class RuntimeStore {
     staleAfterMinutes?: number;
   }) {
     return findActiveCoreMemoryCompressionForkRunPersistence({
+      identityKey: 'xiaoni',
+      ...params,
+      sqlAdapter: this.sql
+    }, databaseConfig);
+  }
+
+  // Boot-time recovery: agent-service's fork promises die with the process, so
+  // any fork-run row still 'running' at our startup is orphaned. Mark them
+  // failed so a stale core-memory row stops blocking the manual 压缩记忆 trigger.
+  async reapOrphanedForkRuns(params: { reason?: string } = {}) {
+    return reapOrphanedForkRunsPersistence({
       identityKey: 'xiaoni',
       ...params,
       sqlAdapter: this.sql

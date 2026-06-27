@@ -338,6 +338,19 @@ async function shutdown(signal: string) {
 
 async function start() {
   await store.initialize();
+  // Fork promises (core-memory compression / subconscious / image vision) live
+  // only in the previous process. Anything left 'running' is orphaned by this
+  // restart; reap it so a stale core-memory row doesn't block manual 压缩记忆.
+  try {
+    const reaped = await store.reapOrphanedForkRuns({ reason: 'orphaned_on_agent_service_restart' });
+    if (reaped.total > 0) {
+      moduleLogger.warn('Reaped orphaned fork runs on startup', reaped);
+    }
+  } catch (error) {
+    moduleLogger.warn('Failed to reap orphaned fork runs on startup', {
+      error: error instanceof Error ? error.message : String(error)
+    });
+  }
   promptDirectoryWatcher.start();
   app.listen(serverConfig.port, serverConfig.host, () => {
     moduleLogger.info('Agent service listening', {
