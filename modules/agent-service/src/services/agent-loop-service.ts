@@ -5147,7 +5147,9 @@ export class AgentLoopService {
       queueMessage: payload,
       runtimePrompt,
       compression: budgetPlan.coreMemoryCompression,
-      contextSessionKey
+      contextSessionKey,
+      // Manual trigger: run even while the loop is stopped (see fork gate).
+      bypassRuntimeEnabledGate: true
     });
     const artifactStatus = typeof (artifact as { status?: unknown })?.status === 'string'
       ? (artifact as { status: string }).status
@@ -9059,6 +9061,10 @@ export class AgentLoopService {
     runtimePrompt: ResolvedAgentRuntimePrompt;
     compression: CoreMemoryCompressionPlan;
     contextSessionKey: string;
+    // Manual admin triggers run as a maintenance action while the loop is
+    // intentionally stopped; they must not park at the runtime-enabled gate.
+    // Auto-overflow forks leave this false so they still respect the pause.
+    bypassRuntimeEnabledGate?: boolean;
   }) {
     const key = params.compression.contextSessionKey || params.contextSessionKey;
     const existing = this.coreMemoryCompressionForks.get(key);
@@ -9165,6 +9171,7 @@ export class AgentLoopService {
     runtimePrompt: ResolvedAgentRuntimePrompt;
     compression: CoreMemoryCompressionPlan;
     contextSessionKey: string;
+    bypassRuntimeEnabledGate?: boolean;
   }): Promise<CoreMemoryCompressionCommit> {
     const forkRunId = `core-memory-fork:${params.queueMessage.runId}:${uuidv4().slice(0, 8)}`;
     const allowedToolNames = new Set<string>([
@@ -9223,7 +9230,9 @@ export class AgentLoopService {
           : forkInput;
         pendingForkOneShotInputItems = [];
         forkRequest.input = normalizeResponseInputItems(forkRequestInput);
-        await this.waitForRuntimeEnabledBeforeModelSlice(params.queueMessage, params.queueMessage.runId);
+        if (!params.bypassRuntimeEnabledGate) {
+          await this.waitForRuntimeEnabledBeforeModelSlice(params.queueMessage, params.queueMessage.runId);
+        }
         const modelResult = await this.executeCoreMemoryCompressionForkTurn(
           forkRequest,
           params.queueMessage,

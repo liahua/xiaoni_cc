@@ -3254,6 +3254,57 @@ test('compress_core_memory preserves caller text and lets the loop continue', as
   assert.match(String((continuation.inputItems[0] as any).output), /core_memory_compressed/);
 });
 
+// Regression: a manual "压缩记忆" trigger runs as a maintenance action while the
+// run loop is intentionally stopped. It must NOT park at the runtime-enabled
+// gate before its model slice, otherwise the fork emits only its start event and
+// silently waits forever. Auto-overflow forks (no bypass flag) must still gate.
+async function runCompressionForkProbingGate(bypassRuntimeEnabledGate: boolean): Promise<{
+  gateCalls: number;
+  reachedModelSlice: boolean;
+}> {
+  const store = { logTimelineEvent: async () => undefined };
+  const service = new AgentLoopService(store as any);
+  let gateCalls = 0;
+  let reachedModelSlice = false;
+  (service as any).recordCoreMemoryCompressionForkRunSafe = async () => undefined;
+  (service as any).waitForRuntimeEnabledBeforeModelSlice = async () => { gateCalls += 1; };
+  (service as any).executeCoreMemoryCompressionForkTurn = async () => {
+    reachedModelSlice = true;
+    throw new Error('__STOP_FORK_AFTER_GATE__');
+  };
+
+  await assert.rejects(
+    (service as any).runCoreMemoryCompressionFork({
+      baseRequest: { input: [] },
+      queueMessage: createQueuePayload(),
+      runtimePrompt: { modelName: 'test-model' },
+      compression: {
+        contextSessionKey: 'xiaoni:test-global',
+        readCutoffAfterConversationId: 60573,
+        previousReadCutoffAfterConversationId: 60561,
+        compressionCoveredEndConversationId: 60573
+      },
+      contextSessionKey: 'xiaoni:test-global',
+      bypassRuntimeEnabledGate
+    }),
+    /__STOP_FORK_AFTER_GATE__/
+  );
+
+  return { gateCalls, reachedModelSlice };
+}
+
+test('manual core memory compression fork bypasses the runtime-enabled gate', async () => {
+  const { gateCalls, reachedModelSlice } = await runCompressionForkProbingGate(true);
+  assert.equal(gateCalls, 0, 'manual trigger must not wait on the runtime-enabled gate');
+  assert.equal(reachedModelSlice, true, 'manual trigger must reach its model slice while loop is stopped');
+});
+
+test('auto-overflow core memory compression fork still respects the runtime-enabled gate', async () => {
+  const { gateCalls, reachedModelSlice } = await runCompressionForkProbingGate(false);
+  assert.equal(gateCalls, 1, 'auto-overflow fork must still gate on the runtime-enabled flag');
+  assert.equal(reachedModelSlice, true);
+});
+
 test('core memory compression commit runs the post-compression hook after durable writes', async () => {
   const calls: string[] = [];
   const store = {
