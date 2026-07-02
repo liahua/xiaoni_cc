@@ -355,10 +355,6 @@ test('next run replay reproduces every folded notify the folding run sent (cache
   const eventIds = runtimeInputs.map((row) => row.event_id);
   assert.equal(new Set(eventIds).size, eventIds.length, 'every runtime_input must have a unique event_id');
 
-  // Both folds were backfilled with the run's conversation id (external linkage stays
-  // written even though replay no longer keys on it — settled path).
-  assert.ok(runtimeInputs.every((row) => row.conversation_id !== null), 'all folds must be attached to the conversation (external linkage)');
-
   // --- What the NEXT run's STACK-NATIVE replay REBUILDS (flat stack range, no cutoff) ---
   // Production reads the flat stack via loadStackHistoryBlocks(cutoff). With no cutoff the
   // whole tail replays; the assembled per-block replay items must reproduce BOTH folds.
@@ -371,20 +367,12 @@ test('next run replay reproduces every folded notify the folding run sent (cache
 
 // Drives a folding run whose provider throws on the turn AFTER the fold, then
 // returns the captured store calls. errorMessage decides transient vs terminal.
-// throwOnAttach injects a DB error into the fold-backfill call to prove the terminal-path
-// guard (.catch per call) keeps failQueueMessage running instead of stranding the run.
-async function runFoldingRunThatFails(errorMessage: string, options: { throwOnAttach?: boolean } = {}) {
+async function runFoldingRunThatFails(errorMessage: string) {
   const foldTrace = 'runtrace-fold-fail';
   const reminder = '【掉线前】又有 1 条新动静：阿花在等你回';
   const built = createFaithfulStore({
     foldsToServe: [foldedNotify('run-A', 'batch-A', foldTrace, reminder)]
   });
-  if (options.throwOnAttach) {
-    built.store.attachConversationIdToTrace = async (traceId: string, conversationId: number) => {
-      built.calls.attachConversationIdToTrace.push({ traceId, conversationId, threw: true });
-      throw new Error('DB blip during fold backfill');
-    };
-  }
   const service = new AgentLoopService(built.store, {
     resolveForQueueMessage: async () => createRuntimePrompt()
   } as any);
@@ -429,13 +417,10 @@ test('provider TERMINAL failure: folded notify is backfilled to the failed conve
   assert.equal(calls.retryQueueMessage.length, 0, 'terminal failure must not schedule a retry');
   assert.equal(calls.failQueueMessage.length, 1, 'terminal failure must fail the queue message');
 
-  // The fold's trace was backfilled with the failed conversation id, so its stack
-  // row is no longer orphaned (conversation_id !== null) and replay reproduces it.
-  const backfilledFoldTrace = calls.attachConversationIdToTrace.some((c: any) => c.traceId === foldTrace);
-  assert.ok(backfilledFoldTrace, 'terminal failure must backfill the folded-notify trace');
+  // The fold's stack row is persisted, so replay reproduces it via stack_index
+  // (the external conversation_id backfill was removed; replay no longer keys on it).
   const foldRow = stack.find((row) => row.trace_id === foldTrace && row.item_kind === 'runtime_input');
   assert.ok(foldRow, 'the folded notify must have been persisted');
-  assert.ok(foldRow!.conversation_id !== null, 'the folded notify must be attached to the failed conversation');
 });
 
 test('provider TRANSIENT failure: folded notify stays NULL for the retry self-heal (no premature pin)', async () => {
@@ -456,15 +441,13 @@ test('provider TRANSIENT failure: folded notify stays NULL for the retry self-he
   assert.equal(foldRow!.conversation_id, null, 'the folded notify must stay NULL for the retry self-heal');
 });
 
-// A transient DB error during the terminal-path fold-backfill must NOT propagate past
-// failQueueMessage. The backfill is a cache-replay safeguard, not a settle prerequisite:
-// a fold left NULL costs only a run-boundary cold read, but a skipped failQueueMessage
-// leaves the run as a locked, never-retried orphan. Before the .catch() guard the throw
-// escaped past failQueueMessage (改坏即红).
-test('provider TERMINAL failure: a backfill DB blip must NOT strand the run (failQueueMessage still fires)', async () => {
-  const { calls } = await runFoldingRunThatFails('模型返回了不可恢复的错误', { throwOnAttach: true });
-  assert.ok(calls.attachConversationIdToTrace.length >= 1, 'the fold-backfill must have been attempted');
-  assert.equal(calls.failQueueMessage.length, 1, 'a backfill throw must NOT skip failQueueMessage — the run must still be marked failed');
+// A terminal failure must always fire failQueueMessage so the run is marked failed
+// (never left as a locked, never-retried orphan). The old conversation_id fold-backfill
+// was removed with the stack-native migration (replay reproduces folds via stack_index),
+// so the terminal path now just fails cleanly.
+test('provider TERMINAL failure: the run is marked failed (failQueueMessage still fires)', async () => {
+  const { calls } = await runFoldingRunThatFails('模型返回了不可恢复的错误');
+  assert.equal(calls.failQueueMessage.length, 1, 'terminal failure must fire failQueueMessage — the run must be marked failed');
   assert.equal(calls.retryQueueMessage.length, 0, 'still a terminal failure — no retry');
 });
 
@@ -780,9 +763,6 @@ test('runtime replay from REAL Postgres reproduces every folded notify (producti
   };
   await (service as any).processRuntimeFrame(queueMessage, { queueBacked: true });
 
-  const convId = store.__conversations[0]?.id;
-  assert.ok(convId, 'the run must have created a conversation (external linkage)');
-
   // Replay EXACTLY as production does: read agent_stack_items from Postgres as a flat
   // stack range (no cutoff → whole tail) via loadStackHistoryBlocks — no conversation grouping.
   const replayed = await (service as any).loadStackHistoryBlocks(null, 'runtrace-REPLAY');
@@ -791,8 +771,8 @@ test('runtime replay from REAL Postgres reproduces every folded notify (producti
   assert.ok(replayText.includes('群里 @了你'), 'DB replay must reproduce folded reminder 2');
 
   // And the underlying rows: both folds persisted with distinct event_ids (the fix),
-  // backfilled to the conversation (NOT dropped by ON CONFLICT on real PG).
-  const rows = await realPersistence.listAgentStackItemsForConversations({ identityKey: 'xiaoni', conversationIds: [convId], limit: 1000 });
+  // read stack-natively by range (NOT dropped by ON CONFLICT on real PG).
+  const rows = await realPersistence.listAgentStackItems({ identityKey: 'xiaoni', afterStackIndex: -1, limit: 1000 });
   const runtimeInputs = rows.filter((r: any) => r.itemKind === 'runtime_input');
   const eventIds = runtimeInputs.map((r: any) => r.eventId);
   assert.equal(new Set(eventIds).size, eventIds.length, 'every runtime_input must have a distinct event_id on real PG');

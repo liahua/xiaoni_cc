@@ -586,7 +586,7 @@ type FeedbackMemorySubagentParams = {
 
 type ContextCompressionMemoryParams = {
   queueMessage: QueueMessageRecord['payload'];
-  conversationId: number;
+  conversationId: number | null;
   evictedTurns: ConversationTurn[];
   runtimePrompt: ResolvedAgentRuntimePrompt;
 };
@@ -2455,7 +2455,7 @@ function buildAgentTurnMetadata(
 function buildFeedbackMemorySubagentTurnMetadata(params: {
   queueMessage: QueueMessageRecord['payload'];
   runtimePrompt: ResolvedAgentRuntimePrompt;
-  conversationId: number;
+  conversationId: number | null;
   subagentTraceId: string;
   turn: number;
 }) {
@@ -2463,7 +2463,7 @@ function buildFeedbackMemorySubagentTurnMetadata(params: {
     trace_id: params.subagentTraceId,
     parent_trace_id: params.queueMessage.traceId,
     parent_run_id: params.queueMessage.runId,
-    parent_conversation_id: String(params.conversationId),
+    parent_conversation_id: params.conversationId != null ? String(params.conversationId) : '',
     batch_id: params.queueMessage.batchId,
     session_key: params.queueMessage.sessionKey,
     source_session_key: params.queueMessage.sessionKey,
@@ -2493,7 +2493,7 @@ function buildFeedbackMemorySubagentTurnMetadata(params: {
 function buildCompactMemorySubagentTurnMetadata(params: {
   queueMessage: QueueMessageRecord['payload'];
   runtimePrompt: ResolvedAgentRuntimePrompt;
-  conversationId: number;
+  conversationId: number | null;
   subagentTraceId: string;
   layer: CompactMemoryLayer;
 }) {
@@ -7091,88 +7091,7 @@ export class AgentLoopService {
         responseReplayItemCount: responseReplayItems.length,
         turnsExecuted
       });
-      conversationId = await this.store.createConversation({
-        userId: sessionIds.userId,
-        groupId: sessionIds.groupId,
-        userMessage: renderConversationStorageUserMessage(payload),
-        aiResponse: finalResponse,
-        sessionKey: payload.sessionKey,
-        transcriptItems: [
-          ...buildInboundBatchTranscriptItems(payload),
-          ...buildAssistantTranscriptItems({
-            queueMessage: payload,
-            deliveredMessages,
-            leaseReleased: true
-          }).map((item) => ({
-            sessionKey: item.sessionKey,
-            role: item.role,
-            phase: item.phase,
-            content: item.content,
-            groupIndex: item.groupIndex,
-            itemIndex: item.itemIndex,
-            source: item.source,
-            deliveryMessageId: item.deliveryMessageId,
-            runId: item.runId,
-            traceId: item.traceId
-          }))
-        ],
-        responseTimeMs: Date.now() - startedAt,
-        status: 'settled',
-        modelName: runtimePrompt?.modelName || null,
-        traceId: payload.traceId,
-        rawRequest: {
-          run_id: queueMessage.id,
-          batch_id: queueMessage.batchId,
-          queue_message_ids: queueMessage.queueMessageIds,
-          continuation_queue_message_ids: continuationQueueMessages.flatMap((message) => message.queueMessageIds),
-          continuation_runs: continuationQueueMessages.map((message) => ({
-            run_id: message.id,
-            batch_id: message.batchId,
-            trace_id: message.traceId,
-            source: message.payload.source,
-            queue_message_ids: message.queueMessageIds
-          })),
-          batch_messages: payload.messages,
-          history_count: historyCount,
-          retained_history_count: budgetPlan.retainedHistory.length,
-          context_budget: {
-            context_session_key: contextSessionKey,
-            context_window_tokens: budgetPlan.contextWindowTokens,
-            target_budget_tokens: budgetPlan.targetBudgetTokens,
-            hard_budget_tokens: budgetPlan.hardBudgetTokens,
-            estimated_input_tokens: budgetPlan.estimatedInputTokens,
-            tokenizer_encoding: budgetPlan.tokenizerEncoding,
-            tokenizer_source: budgetPlan.tokenizerSource,
-            read_cutoff_after_stack_index: budgetPlan.readCutoffAfterStackIndex,
-            cutoff_recomputed: budgetPlan.cutoffRecomputed
-          },
-          prompt: {
-            source: runtimePrompt.source,
-            prompt_id: runtimePrompt.promptId,
-            prompt_name: runtimePrompt.promptName,
-            model_name: runtimePrompt.modelName
-          },
-          retrieved_feedback_reflections: [],
-          runtime_identity_facts: runtimeIdentityFacts,
-          runtime_stream: runtimeStream
-        },
-        rawResponse: {
-          sent_messages: sentMessages,
-          xiaoni_os: persistedXiaoniOs,
-          pending_share: persistedPendingShare,
-          loop_stage_artifacts: {
-            unread_meaning: unreadMeaningArtifact,
-            core_memory_compression: coreMemoryCompressionArtifact
-          },
-          context_budget_turns: contextBudgetTurns.map(serializeContextBudgetTurnRecord),
-          responses_replay_items: responseReplayItems,
-          runtime_stream: runtimeStream,
-          model_request_slices: turnsExecuted,
-          lease_release: leaseRelease,
-          lease_release_reason: leaseRelease.reason,
-          no_visible_delivery: leaseRelease.no_visible_delivery
-        }
-      });
+      conversationId = null;
       if (evictedTurns.length > 0) {
         this.scheduleContextCompressionMemoryWriter({
           queueMessage: payload,
@@ -7188,10 +7107,6 @@ export class AgentLoopService {
         runtimeIdentityFacts
       });
 
-      await this.store.attachConversationIdToTrace(payload.traceId, conversationId);
-      for (const continuationQueueMessage of continuationQueueMessages) {
-        await this.store.attachConversationIdToTrace(continuationQueueMessage.payload.traceId, conversationId);
-      }
       if (options.queueBacked) {
         const queueSettleResult = {
           no_visible_delivery: leaseRelease.no_visible_delivery,
@@ -7295,85 +7210,7 @@ export class AgentLoopService {
         visibleDeliveryCommitted: sentMessages.length > 0,
         source: 'runtime:error'
       });
-      conversationId = await this.store.createConversation({
-        userId: sessionIds.userId,
-        groupId: sessionIds.groupId,
-        userMessage: renderConversationStorageUserMessage(payload),
-        aiResponse: null,
-        sessionKey: payload.sessionKey,
-        transcriptItems: [
-          ...buildInboundBatchTranscriptItems(payload),
-          ...buildAssistantTranscriptItems({
-            queueMessage: payload,
-            deliveredMessages,
-            leaseReleased: true
-          }).map((item) => ({
-            sessionKey: item.sessionKey,
-            role: item.role,
-            phase: item.phase,
-            content: item.content,
-            groupIndex: item.groupIndex,
-            itemIndex: item.itemIndex,
-            source: item.source,
-            deliveryMessageId: item.deliveryMessageId,
-            runId: item.runId,
-            traceId: item.traceId
-          }))
-        ],
-        responseTimeMs: Date.now() - startedAt,
-        status: 'failed',
-        errorReason: message,
-        modelName: runtimePrompt?.modelName || null,
-        traceId: payload.traceId,
-        rawRequest: {
-          run_id: queueMessage.id,
-          batch_id: queueMessage.batchId,
-          queue_message_ids: queueMessage.queueMessageIds,
-          batch_messages: payload.messages,
-          history_count: historyCount,
-          retained_history_count: budgetPlan.retainedHistory.length,
-          context_budget: {
-            context_window_tokens: budgetPlan.contextWindowTokens,
-            target_budget_tokens: budgetPlan.targetBudgetTokens,
-            hard_budget_tokens: budgetPlan.hardBudgetTokens,
-            estimated_input_tokens: budgetPlan.estimatedInputTokens,
-            tokenizer_encoding: budgetPlan.tokenizerEncoding,
-            tokenizer_source: budgetPlan.tokenizerSource,
-            read_cutoff_after_stack_index: budgetPlan.readCutoffAfterStackIndex,
-            cutoff_recomputed: budgetPlan.cutoffRecomputed
-          },
-          prompt: {
-            source: runtimePrompt?.source || null,
-            prompt_id: runtimePrompt?.promptId || null,
-            prompt_name: runtimePrompt?.promptName || null,
-            model_name: runtimePrompt?.modelName || null
-          },
-          runtime_stream: runtimeStream
-        },
-        rawResponse: {
-          sent_messages: sentMessages,
-          xiaoni_os: null,
-          context_budget_turns: contextBudgetTurns.map(serializeContextBudgetTurnRecord),
-          responses_replay_items: responseReplayItems,
-          runtime_stream: runtimeStream,
-          model_request_slices: turnsExecuted,
-          lease_release: leaseRelease,
-          lease_release_reason: leaseRelease.reason,
-          no_visible_delivery: leaseRelease.no_visible_delivery,
-          queue_retry_eligible: transientQueueRetryEligible
-        }
-      });
-      // Same guard rationale as the folded-notify backfill below: this run-trace backfill is
-      // a cache-replay safeguard, NOT a settle/retry prerequisite. A transient DB error here
-      // must not propagate past the retry/fail handling below — otherwise the run is left
-      // neither retried nor failed (a locked orphan). A NULL trace only costs a cold read.
-      await this.store.attachConversationIdToTrace(payload.traceId, conversationId).catch((backfillError) => {
-        moduleLogger.warn('run-trace backfill attachConversationIdToTrace failed; trace stays NULL', {
-          traceId: payload.traceId,
-          conversationId,
-          error: backfillError instanceof Error ? backfillError.message : String(backfillError)
-        });
-      });
+      conversationId = null;
       let queueRetryScheduled = false;
       if (transientQueueRetryEligible) {
         const retryStore = this.store as RuntimeStore & {
@@ -7418,33 +7255,6 @@ export class AgentLoopService {
         }
       }
       if (options.queueBacked && !queueRetryScheduled) {
-        // Mirror the settled-path fold backfill (attachConversationIdToTrace loop
-        // above): a TERMINALLY-failed run won't reprocess, so its folded-notify stack
-        // rows must be attached to THIS failed conversation now to keep the external
-        // conversation_id linkage intact (provider/admin). Replay itself is now stack-
-        // native (a stack_index range read, no conversation grouping), so the folds are
-        // reproduced by their stack_index regardless; the backfill is the linkage write.
-        // The provider may still hold this run's cached prefix INCLUDING those folds, so
-        // the next run's stack-replay must reproduce them byte-for-byte or the prompt cache
-        // breaks at the run boundary. Guarded on !queueRetryScheduled: attachConversationIdToTrace
-        // is COALESCE (first-write-wins), so backfilling to the FAILED conversation on a
-        // retry path would pin the folds here and block the retry's success-settle from
-        // attaching them to the real conversation — re-creating the very breakdown. On
-        // retry the folds stay NULL and ride the reprocessed run's settle instead.
-        // Best-effort, per-call guarded: this backfill is a cache-replay safeguard, NOT a
-        // settle prerequisite. A transient DB error on one fold must NOT propagate past
-        // failQueueMessage below — otherwise the run is left neither failed nor retried
-        // (a locked, orphaned queue row), which is strictly worse than a fold staying NULL.
-        // A NULL fold only costs a run-boundary cold read; a stranded run costs the run.
-        for (const continuationQueueMessage of continuationQueueMessages) {
-          await this.store.attachConversationIdToTrace(continuationQueueMessage.payload.traceId, conversationId).catch((backfillError) => {
-            moduleLogger.warn('failed-path fold-backfill attachConversationIdToTrace failed; fold stays NULL', {
-              traceId: continuationQueueMessage.payload.traceId,
-              conversationId,
-              error: backfillError instanceof Error ? backfillError.message : String(backfillError)
-            });
-          });
-        }
         // Folded notify messages share this run's run_id, so failing queueMessage.id
         // fails them too. When a retry IS scheduled, retryQueueMessage(queueMessage.id)
         // resets them to pending alongside the main message (reprocessed, not lost).
@@ -7587,7 +7397,7 @@ export class AgentLoopService {
 
   private async recordRuntimeIdentityActivation(params: {
     queueMessage: QueueMessageRecord['payload'];
-    conversationId: number;
+    conversationId: number | null;
     runtimeIdentityFacts: RuntimeIdentityFactProjection[];
   }) {
     if (params.runtimeIdentityFacts.length === 0) {

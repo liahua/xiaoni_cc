@@ -38,7 +38,6 @@ import {
   appendImageVisionForkItems as appendImageVisionForkItemsPersistence,
   recordImageVisionForkSlice as recordImageVisionForkSlicePersistence,
   recordCacheHeartbeatForkRun as recordCacheHeartbeatForkRunPersistence,
-  attachConversationIdToAgentStackByTrace,
   ensureIdentityLineageSchema,
   ensureXiaoniIdentityRoot,
   ensureFeedbackReflectionSchema,
@@ -109,16 +108,12 @@ import {
   createLlmJob as createLlmJobPersistence,
   updateLlmJob as updateLlmJobPersistence,
   logRuntimeTimelineEvent,
-  listRecentConversationTurns,
-  createConversationWithItems,
-  attachConversationIdToRuntimeTrace,
   getSessionReadCutoffState as getSessionReadCutoffStatePersistence,
   upsertSessionReadCutoffState as upsertSessionReadCutoffStatePersistence,
   commitSessionContextSummaryAndReadCutoff as commitSessionContextSummaryAndReadCutoffPersistence,
   upsertProactiveShareState as upsertProactiveShareStatePersistence,
   upsertSessionContextSummary as upsertSessionContextSummaryPersistence,
   setSessionCompressionTriggerCounter as setSessionCompressionTriggerCounterPersistence,
-  loadSessionReplayState as loadSessionReplayStatePersistence,
   serializeTimestampForApi,
   type AgentLifeEventProjection,
   type AgentRecoveryCacheHeartbeatClaimResult,
@@ -508,25 +503,6 @@ export type RuntimeTopicProjection = {
   updatedAt: string | null;
 };
 
-export type RuntimeMemoryRagContext = {
-  packSummary: string;
-  timeScope: {
-    oldestMessageAt: string | null;
-    newestMessageAt: string | null;
-  };
-  segments: Array<{
-    segmentId: string;
-    reason: string;
-    source: 'recent_turns' | 'summary_bridge';
-    messageIds: number[];
-    content: string;
-  }>;
-  bridgeNotes: Array<{
-    kind: 'compact_bridge';
-    summary: string;
-  }>;
-};
-
 type FeedbackReflectionScore = {
   reflection: RuntimeFeedbackReflection;
   learningState: RuntimeFeedbackLearningState | null;
@@ -580,25 +556,6 @@ function buildSearchTokens(text: string) {
   }
 
   return Array.from(tokens);
-}
-
-function estimateBudgetLength(targetTokenBudget: number) {
-  const normalized = Number.isFinite(targetTokenBudget) ? Math.max(1024, Math.trunc(targetTokenBudget)) : 12000;
-  return normalized * 3;
-}
-
-function renderTranscriptItemForMemoryPack(turn: ConversationTurn) {
-  const transcriptItems = Array.isArray(turn.items) ? turn.items : [];
-  if (transcriptItems.length > 0) {
-    return transcriptItems
-      .map((item) => `${item.role}${item.phase ? `/${item.phase}` : ''}: ${item.content}`)
-      .join('\n');
-  }
-
-  return [
-    `user: ${turn.userMessage}`,
-    turn.aiResponse ? `assistant: ${turn.aiResponse}` : ''
-  ].filter(Boolean).join('\n');
 }
 
 function parseSelfEvolutionState(row: Record<string, unknown>): RuntimeSelfEvolutionState {
@@ -2575,18 +2532,6 @@ export class RuntimeStore {
     }, databaseConfig);
   }
 
-  async listRecentTurns(params: {
-    userId: number;
-    groupId?: number | null;
-    afterConversationId?: number | null;
-    limit?: number;
-    scope?: 'session' | 'global';
-  }): Promise<ConversationTurn[]> {
-    return listRecentConversationTurns({
-      ...params,
-      sqlAdapter: this.sql
-    }, databaseConfig) as Promise<ConversationTurn[]>;
-  }
 
   async getSessionReadCutoffState(sessionKey: string): Promise<SessionReadCutoffState | null> {
     return getSessionReadCutoffStatePersistence({
@@ -2653,21 +2598,6 @@ export class RuntimeStore {
     }, databaseConfig);
   }
 
-  async loadSessionReplayState(params: {
-    userId: number;
-    groupId?: number | null;
-  }): Promise<{
-    summaryText: string | null;
-    summarizedThroughConversationId: number | null;
-  }> {
-    return loadSessionReplayStatePersistence({
-      ...params,
-      sqlAdapter: this.sql
-    }, databaseConfig) as Promise<{
-      summaryText: string | null;
-      summarizedThroughConversationId: number | null;
-    }>;
-  }
 
   async getSpeakerTrustLevel(identityKey: string, speakerQq: number): Promise<'L1' | 'L2' | 'L3' | 'L4'> {
     try {
@@ -3544,75 +3474,6 @@ export class RuntimeStore {
     };
   }
 
-  async buildMemoryRagContext(params: {
-    userId: number;
-    groupId?: number | null;
-    currentMessageText: string;
-    recentUserIds?: number[];
-    targetTokenBudget?: number;
-  }): Promise<RuntimeMemoryRagContext> {
-    const replayState = await this.loadSessionReplayState({
-      userId: params.userId,
-      groupId: params.groupId ?? null
-    });
-    const history = await this.listRecentTurns({
-      userId: params.userId,
-      groupId: params.groupId ?? null,
-      afterConversationId: replayState.summarizedThroughConversationId
-    });
-
-    const maxChars = estimateBudgetLength(params.targetTokenBudget || 12000);
-    const pickedTurns: ConversationTurn[] = [];
-    let usedChars = 0;
-
-    for (const turn of [...history].reverse()) {
-      const block = renderTranscriptItemForMemoryPack(turn);
-      if (!block.trim()) {
-        continue;
-      }
-      if (pickedTurns.length > 0 && usedChars + block.length > maxChars) {
-        break;
-      }
-      pickedTurns.unshift(turn);
-      usedChars += block.length;
-    }
-
-    const segments = pickedTurns.map((turn, index) => {
-      const transcriptItems = Array.isArray(turn.items) ? turn.items : [];
-      const messageIds = transcriptItems
-        .map((item) => Number(item.id))
-        .filter((value) => Number.isFinite(value) && value > 0);
-      return {
-        segmentId: `recent-turn-${index + 1}`,
-        reason: index === 0 ? 'oldest retained recent turn' : index === pickedTurns.length - 1 ? 'latest retained recent turn' : 'recent thread continuation',
-        source: 'recent_turns' as const,
-        messageIds,
-        content: renderTranscriptItemForMemoryPack(turn)
-      };
-    });
-
-    const bridgeNotes = replayState.summaryText
-      ? [{
-          kind: 'compact_bridge' as const,
-          summary: replayState.summaryText
-        }]
-      : [];
-
-    return {
-      packSummary: segments.length > 0
-        ? 'Long-context memory pack stitched from recent transcript trajectory.'
-        : bridgeNotes.length > 0
-          ? 'No raw recent turns available, using compact bridge only.'
-          : 'No historical memory context available.',
-      timeScope: {
-        oldestMessageAt: null,
-        newestMessageAt: null
-      },
-      segments,
-      bridgeNotes
-    };
-  }
-
   private async loadSelfEvolutionStates(params: {
     groupId: number | null;
     currentUserId: number;
@@ -3666,44 +3527,6 @@ export class RuntimeStore {
       currentUserStates: currentUserRows.map((row) => parseSelfEvolutionState(row as Record<string, unknown>)),
       recentUserStates: recentRowsList.flat().map((row) => parseSelfEvolutionState(row as Record<string, unknown>))
     };
-  }
-
-  async createConversation(params: {
-    batchId?: number | null;
-    userId: number;
-    groupId?: number | null;
-    userMessage: string;
-    aiResponse?: string | null;
-    sessionKey?: string | null;
-    transcriptItems?: ConversationTranscriptItemInput[];
-    responseTimeMs: number;
-    status: string;
-    errorReason?: string | null;
-    modelName?: string | null;
-    traceId: string;
-    rawRequest?: Record<string, unknown>;
-    rawResponse?: Record<string, unknown>;
-  }) {
-    return createConversationWithItems({
-      ...params,
-      sqlAdapter: this.sql
-    }, databaseConfig);
-  }
-
-  async attachConversationIdToTrace(traceId: string, conversationId: number) {
-    await Promise.all([
-      attachConversationIdToRuntimeTrace({
-        traceId,
-        conversationId,
-        useCoalesceAssignment: true,
-        sqlAdapter: this.sql
-      }, databaseConfig),
-      attachConversationIdToAgentStackByTrace({
-        traceId,
-        conversationId,
-        sqlAdapter: this.sql
-      }, databaseConfig)
-    ]);
   }
 
   private async ensureSchema() {
