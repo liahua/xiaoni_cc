@@ -99,37 +99,6 @@ describe('chat settings routes', () => {
     });
   });
 
-  it('marks the configured owner private chat as forced into Xiaoni IM', async () => {
-    const previousDirectIds = process.env.XIAONI_DIRECT_AGENT_TRIGGER_USER_IDS;
-    process.env.XIAONI_DIRECT_AGENT_TRIGGER_USER_IDS = '85178516';
-    try {
-      const database = createDatabaseMock();
-      database.executeQuery
-        .mockResolvedValueOnce([])
-        .mockResolvedValueOnce([{ today_conversations: '0', today_success: '0', today_failed: '0' }])
-        .mockResolvedValueOnce([])
-        .mockResolvedValueOnce([{ total: '0' }]);
-
-      const response = await request(createApp(database))
-        .get('/api/private-chats/85178516');
-
-      expect(response.status).toBe(200);
-      expect(response.body.data.user_settings).toMatchObject({
-        user_id: 85178516,
-        direct_force_im_trigger_enabled: 1,
-        im_receive_enabled: 1,
-        agent_im_entry_enabled: 1,
-        auto_reply_enabled: 1,
-      });
-    } finally {
-      if (previousDirectIds === undefined) {
-        delete process.env.XIAONI_DIRECT_AGENT_TRIGGER_USER_IDS;
-      } else {
-        process.env.XIAONI_DIRECT_AGENT_TRIGGER_USER_IDS = previousDirectIds;
-      }
-    }
-  });
-
   it('filters forced owner private chats by effective IM entry state', async () => {
     const previousDirectIds = process.env.XIAONI_DIRECT_AGENT_TRIGGER_USER_IDS;
     process.env.XIAONI_DIRECT_AGENT_TRIGGER_USER_IDS = '85178516';

@@ -116,11 +116,6 @@ export function createLogRoutes(database: DatabaseManager, logger: winston.Logge
       const filters = [];
       const params = [];
 
-      if (req.query.conversation_id) {
-        filters.push('conversation_id = ?');
-        params.push(req.query.conversation_id);
-      }
-
       if (req.query.trace_id) {
         filters.push('trace_id = ?');
         params.push(req.query.trace_id);
@@ -140,7 +135,7 @@ export function createLogRoutes(database: DatabaseManager, logger: winston.Logge
 
       const logs = await database.executeQuery(
         `SELECT
-          id, conversation_id, trace_id, NULL::text AS session_id, model_name,
+          id, trace_id, NULL::text AS session_id, model_name,
           LEFT(COALESCE(canonical_request::jsonb->>'instructions', CAST(canonical_request AS text)), 200) as prompt_preview,
           request_format_version, wire_provider_format,
           LEFT(COALESCE(CAST(canonical_response AS text), CAST(wire_response AS text), CAST(raw_response AS text), CAST(output_items AS text)), 200) as response_preview,

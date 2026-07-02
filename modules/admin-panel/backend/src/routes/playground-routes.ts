@@ -71,30 +71,6 @@ export function createPlaygroundRoutes(database: DatabaseManager, logger: winsto
     }
   });
 
-  router.post('/playground/cases/from-conversation/:conversationId', async (req, res) => {
-    try {
-      await ready;
-      const record = await caseBuilder.createCaseFromConversation(
-        req.params.conversationId,
-        typeof req.body?.promptId === 'string' ? req.body.promptId : null
-      );
-
-      res.json({
-        success: true,
-        data: record,
-        timestamp: new Date().toISOString()
-      });
-    } catch (error) {
-      logger.error('Failed to create playground case from conversation', { error, conversationId: req.params.conversationId });
-      res.status(errorStatusCode(error)).json({
-        success: false,
-        error: 'Failed to create playground case from conversation',
-        message: error instanceof Error ? error.message : 'Unknown error',
-        timestamp: new Date().toISOString()
-      });
-    }
-  });
-
   router.post('/playground/cases/from-span', async (req, res) => {
     try {
       await ready;

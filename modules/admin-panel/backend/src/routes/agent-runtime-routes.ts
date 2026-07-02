@@ -23,9 +23,6 @@ import {
 } from '@qq-bot/persistence';
 import { DatabaseManager } from '../services/database';
 import {
-  buildConversationTracePayload,
-  buildConversationTraceSpanDetail,
-  buildConversationRawProviderTrace,
   buildStackTracePayload,
   buildStackTraceSpanDetail,
   buildStackRawProviderTrace
@@ -528,25 +525,6 @@ async function resolveActionEventTraceTarget(
 ): Promise<ActionEventTraceTarget | null> {
   const eventId = decodeEventId(rawEventId);
   return await findXiaoniActionEventTraceTarget(eventId) as ActionEventTraceTarget | null;
-}
-
-function shouldUseStackTrace(target: ActionEventTraceTarget): boolean {
-  if (target.sourceKind === 'compression_fork' || target.sourceKind === 'subconscious_agent_fork' || target.sourceKind === 'image_vision_fork') {
-    return true;
-  }
-
-  if (target.llmRequestSliceId || target.toolCallId || target.stackItemId) {
-    return true;
-  }
-
-  const spanId = target.spanId || '';
-  return spanId.startsWith('stack-slice:')
-    || spanId.startsWith('tool-call:')
-    || spanId.startsWith('tool-output:')
-    || spanId.startsWith('compression-fork-')
-    || spanId.startsWith('subconscious-fork-')
-    || spanId.startsWith('image-vision-fork-')
-    || spanId.startsWith('provider-request:wire:');
 }
 
 const DEFAULT_ACTION_COST_BY_EVENT_KIND: Record<string, number> = {
@@ -1153,9 +1131,7 @@ export function createAgentRuntimeRoutes(database: DatabaseManager, logger: wins
         });
       }
 
-      const payload = target.conversationId && !shouldUseStackTrace(target)
-        ? await buildConversationTracePayload(database, logger, target.conversationId)
-        : await buildStackTracePayload(logger, target);
+      const payload = await buildStackTracePayload(logger, target);
       if (!payload) {
         return res.status(404).json({
           success: false,
@@ -1198,9 +1174,7 @@ export function createAgentRuntimeRoutes(database: DatabaseManager, logger: wins
       }
 
       const spanId = decodeEventId(req.params.spanId);
-      const detail = target.conversationId && !shouldUseStackTrace(target)
-        ? await buildConversationTraceSpanDetail(database, logger, target.conversationId, spanId)
-        : await buildStackTraceSpanDetail(logger, target, spanId);
+      const detail = await buildStackTraceSpanDetail(logger, target, spanId);
       if (!detail) {
         return res.status(404).json({
           success: false,
@@ -1241,9 +1215,7 @@ export function createAgentRuntimeRoutes(database: DatabaseManager, logger: wins
 
       const requestedSpanId = firstQueryString(req.query.spanId);
       const spanId = decodeEventId(requestedSpanId || target.spanId || '');
-      const rawTrace = target.conversationId && !shouldUseStackTrace(target)
-        ? await buildConversationRawProviderTrace(database, logger, target.conversationId, spanId)
-        : await buildStackRawProviderTrace(logger, target, spanId);
+      const rawTrace = await buildStackRawProviderTrace(logger, target, spanId);
       if (!rawTrace) {
         return res.status(404).json({
           success: false,

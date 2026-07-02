@@ -183,54 +183,6 @@ export function createStatusRoutes(database: DatabaseManager, logger: winston.Lo
     return proxyProviderRuntimeEndpoint(res, logger, 'post', '/api/napcat-login/qrcode', {});
   });
 
-  // 仪表板统计数据
-  router.get('/dashboard/stats', async (req, res) => {
-    try {
-      if (!database) {
-        return res.status(500).json({
-          success: false,
-          error: 'Database service not available',
-          timestamp: new Date().toISOString()
-        });
-      }
-
-      // 并行获取各种统计数据
-      const [
-        conversationsResult,
-        sessionsResult,
-        llmCallsResult
-      ] = await Promise.all([
-        database.executeQuery<{ count: number }>('SELECT COUNT(*) as count FROM conversations'),
-        database.executeQuery<{ count: number }>("SELECT COUNT(*) as count FROM conversation_sessions WHERE status = 'active'"),
-        database.executeQuery<{ count: number }>(
-          `SELECT COUNT(*) as count
-           FROM llm_request_slices
-           WHERE created_at >= CURRENT_DATE
-             AND created_at < CURRENT_DATE + INTERVAL '1 day'`
-        )
-      ]);
-
-      res.json({
-        success: true,
-        data: {
-          total_conversations: conversationsResult[0]?.count || 0,
-          active_sessions: sessionsResult[0]?.count || 0,
-          llm_calls_today: llmCallsResult[0]?.count || 0
-        },
-        timestamp: new Date().toISOString()
-      });
-
-    } catch (error) {
-      logger.error('Failed to fetch dashboard stats', { error });
-      res.status(500).json({
-        success: false,
-        error: 'Failed to fetch dashboard stats',
-        message: error instanceof Error ? error.message : 'Unknown error',
-        timestamp: new Date().toISOString()
-      });
-    }
-  });
-
   // 数据库连接测试
   router.get('/database/test', async (req, res) => {
     try {

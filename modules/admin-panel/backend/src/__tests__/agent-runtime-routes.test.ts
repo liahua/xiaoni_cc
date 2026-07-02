@@ -4,9 +4,6 @@ import winston from 'winston';
 import axios from 'axios';
 import { createAgentRuntimeRoutes } from '../routes/agent-runtime-routes';
 import {
-  buildConversationTracePayload,
-  buildConversationTraceSpanDetail,
-  buildConversationRawProviderTrace,
   buildStackTracePayload,
   buildStackTraceSpanDetail,
   buildStackRawProviderTrace
@@ -47,9 +44,6 @@ jest.mock('@qq-bot/persistence', () => ({
 }));
 
 jest.mock('../services/trace-span-builder', () => ({
-  buildConversationTracePayload: jest.fn(),
-  buildConversationTraceSpanDetail: jest.fn(),
-  buildConversationRawProviderTrace: jest.fn(),
   buildStackTracePayload: jest.fn(),
   buildStackTraceSpanDetail: jest.fn(),
   buildStackRawProviderTrace: jest.fn()
@@ -1174,7 +1168,6 @@ describe('agent runtime action event trace routes', () => {
     expect(response.body.success).toBe(true);
     expect(database.executeQuery).not.toHaveBeenCalled();
     expect(findXiaoniActionEventTraceTarget).toHaveBeenCalledWith('llm-slice:slice_abc');
-    expect(buildConversationTracePayload).not.toHaveBeenCalled();
     expect(buildStackTracePayload).toHaveBeenCalledWith(expect.anything(), {
       traceId: 'trace-1',
       conversationId: '42',
@@ -1213,7 +1206,6 @@ describe('agent runtime action event trace routes', () => {
 
     expect(response.status).toBe(200);
     expect(response.body.success).toBe(true);
-    expect(buildConversationTraceSpanDetail).not.toHaveBeenCalled();
     expect(buildStackTraceSpanDetail).toHaveBeenCalledWith(
       expect.anything(),
       {
@@ -1281,7 +1273,6 @@ describe('agent runtime action event trace routes', () => {
 
     expect(response.status).toBe(200);
     expect(response.body.success).toBe(true);
-    expect(buildConversationRawProviderTrace).not.toHaveBeenCalled();
     expect(buildStackRawProviderTrace).toHaveBeenCalledWith(
       expect.anything(),
       {
@@ -1356,7 +1347,6 @@ describe('agent runtime action event trace routes', () => {
 
     expect(response.status).toBe(200);
     expect(response.body.success).toBe(true);
-    expect(buildConversationRawProviderTrace).not.toHaveBeenCalled();
     expect(buildStackRawProviderTrace).toHaveBeenCalledWith(
       expect.anything(),
       expect.objectContaining({
@@ -1370,7 +1360,7 @@ describe('agent runtime action event trace routes', () => {
     expect(response.body.data.source).toBe('image_vision_fork_slices.provider_exchange');
   });
 
-  it('resolves a life action event to its conversation trace', async () => {
+  it('resolves a life action event to its stack trace', async () => {
     const database = createDatabaseMock();
     (findXiaoniActionEventTraceTarget as jest.Mock).mockResolvedValueOnce({
       traceId: 'trace-internal',
@@ -1378,8 +1368,8 @@ describe('agent runtime action event trace routes', () => {
       spanId: 'llm-call:llm_abc',
       internalExecutionLeaseId: 'lease-internal'
     });
-    (buildConversationTracePayload as jest.Mock).mockResolvedValueOnce({
-      conversation_id: '42',
+    (buildStackTracePayload as jest.Mock).mockResolvedValueOnce({
+      conversation_id: null,
       batch_id: null,
       trace: { trace_id: 'trace-internal', status: 'ok' },
       spans: [],
@@ -1391,7 +1381,7 @@ describe('agent runtime action event trace routes', () => {
       .get('/api/xiaoni/action-stream/events/life%3A1/trace');
 
     expect(response.status).toBe(200);
-    expect(buildConversationTracePayload).toHaveBeenCalledWith(expect.anything(), expect.anything(), '42');
+    expect(buildStackTracePayload).toHaveBeenCalled();
     expect(response.body.data.action_event).toEqual({
       event_id: 'life:1',
       focus_span_id: 'llm-call:llm_abc',
@@ -1408,7 +1398,6 @@ describe('agent runtime action event trace routes', () => {
 
     expect(response.status).toBe(404);
     expect(database.executeQuery).not.toHaveBeenCalled();
-    expect(buildConversationTracePayload).not.toHaveBeenCalled();
   });
 
   it('falls back to stack trace when the target has no conversation', async () => {
@@ -1436,7 +1425,6 @@ describe('agent runtime action event trace routes', () => {
 
     expect(response.status).toBe(200);
     expect(database.executeQuery).not.toHaveBeenCalled();
-    expect(buildConversationTracePayload).not.toHaveBeenCalled();
     expect(buildStackTracePayload).toHaveBeenCalledWith(expect.anything(), {
       traceId: 'runtrace-global',
       conversationId: null,
@@ -1475,7 +1463,6 @@ describe('agent runtime action event trace routes', () => {
 
     expect(response.status).toBe(200);
     expect(response.body.success).toBe(true);
-    expect(buildConversationTraceSpanDetail).not.toHaveBeenCalled();
     expect(buildStackTraceSpanDetail).toHaveBeenCalledWith(
       expect.anything(),
       {

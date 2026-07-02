@@ -7,7 +7,6 @@ import winston from 'winston';
 import { DatabaseManager } from './services/database';
 import inboxRoutes from './routes/inbox';
 import { createDebugRoutes } from './routes/debug-routes';
-import { createConversationRoutes } from './routes/conversation-routes';
 import { createLogRoutes } from './routes/log-routes';
 import { createStatusRoutes } from './routes/status-routes';
 import { createPromptRoutes } from './routes/prompt-routes';
@@ -126,10 +125,6 @@ async function startServer() {
   } catch (error) {
     logger.error('❌ Failed to register status routes:', error);
   }
-  logger.info('🔧 Registering conversation routes...');
-  const conversationRouter = createConversationRoutes(database, logger);
-  logger.info('🔍 Conversation router created:', typeof conversationRouter);
-  app.use('/api', conversationRouter);   // Conversations, timeline
   logger.info('🔧 Registering log routes...');
   app.use('/api', createLogRoutes(database, logger));           // Log queries
   logger.info('🔧 Registering prompt routes...');

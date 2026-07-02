@@ -47,36 +47,13 @@ describe('chat settings route regressions', () => {
           agent_prompt_id: null,
         }
       ])
-      .mockResolvedValueOnce([{ total: '1' }])
-      .mockResolvedValueOnce([
-        {
-          user_id: 999999991,
-          username: 'stale-user',
-          is_enabled: 1,
-          continuous_learning_enabled: 1,
-          auto_reply_enabled: 1,
-          welcome_message: null,
-          user_notes: null,
-          transcript_compact_offset: 6,
-          agent_prompt_id: null,
-          last_activity: null,
-        }
-      ])
-      .mockResolvedValueOnce([{ today_conversations: '0', today_success: '0', today_failed: '0' }])
-      .mockResolvedValueOnce([])
       .mockResolvedValueOnce([{ total: '1' }]);
 
     const app = createApp(database);
     const listResponse = await request(app).get('/api/private-chats?page=1&limit=20');
-    const detailResponse = await request(app).get('/api/private-chats/999999991');
 
     expect(listResponse.status).toBe(200);
-    expect(detailResponse.status).toBe(200);
     expect(listResponse.body.data[0]).toMatchObject({
-      user_id: 999999991,
-      auto_reply_enabled: 1,
-    });
-    expect(detailResponse.body.data.user_settings).toMatchObject({
       user_id: 999999991,
       auto_reply_enabled: 1,
     });

@@ -299,20 +299,20 @@ export function createChatRoutes(database: DatabaseManager, logger: winston.Logg
         FROM group_chat_settings g
         LEFT JOIN (
           SELECT
-            group_id,
+            peer_id AS group_id,
             COUNT(*) as total_conversations,
-            COUNT(CASE WHEN status <> 'received' THEN 1 END) as total_reply_attempts,
-            COUNT(CASE WHEN status = 'completed' AND ai_response IS NOT NULL AND ai_response != '' THEN 1 END) as successful_replies,
-            COUNT(CASE WHEN status = 'failed' OR (status <> 'received' AND (ai_response IS NULL OR ai_response = '')) THEN 1 END) as failed_replies,
+            COUNT(*) as total_reply_attempts,
+            COUNT(CASE WHEN status = 'completed' AND no_reply = FALSE AND final_response IS NOT NULL AND final_response != '' THEN 1 END) as successful_replies,
+            COUNT(CASE WHEN status = 'failed' OR (status = 'completed' AND (no_reply = TRUE OR final_response IS NULL OR final_response = '')) THEN 1 END) as failed_replies,
             CASE
-              WHEN COUNT(CASE WHEN status <> 'received' THEN 1 END) = 0 THEN 0
-              ELSE ROUND(COUNT(CASE WHEN status = 'completed' AND ai_response IS NOT NULL AND ai_response != '' THEN 1 END) * 100.0 / COUNT(CASE WHEN status <> 'received' THEN 1 END), 1)
+              WHEN COUNT(*) = 0 THEN 0
+              ELSE ROUND(COUNT(CASE WHEN status = 'completed' AND no_reply = FALSE AND final_response IS NOT NULL AND final_response != '' THEN 1 END) * 100.0 / COUNT(*), 1)
             END as success_rate,
-            AVG(CASE WHEN response_time > 0 THEN response_time ELSE NULL END) as avg_response_time
-          FROM conversations
-          WHERE group_id IS NOT NULL
-          GROUP BY group_id
-        ) stats ON g.group_id = stats.group_id
+            AVG(CASE WHEN completed_at IS NOT NULL AND started_at IS NOT NULL THEN EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000 ELSE NULL END) as avg_response_time
+          FROM agent_runs
+          WHERE chat_type = 'group'
+          GROUP BY peer_id
+        ) stats ON CAST(g.group_id AS TEXT) = stats.group_id
         WHERE ${whereClause}
         ORDER BY ${orderBy}
         LIMIT ${limit} OFFSET ${offset}
@@ -447,22 +447,22 @@ export function createChatRoutes(database: DatabaseManager, logger: winston.Logg
         FROM (
           SELECT user_id FROM private_chat_settings
           UNION
-          SELECT DISTINCT user_id FROM conversations WHERE group_id IS NULL
+          SELECT DISTINCT CAST(peer_id AS BIGINT) AS user_id FROM agent_runs WHERE chat_type = 'direct' AND peer_id ~ '^[0-9]+$'
           ${directTriggerTargetsSql}
         ) targets
         LEFT JOIN private_chat_settings pcs ON targets.user_id = pcs.user_id
         LEFT JOIN (
           SELECT
-            user_id,
-            MAX(timestamp) as last_conversation_time,
+            CAST(peer_id AS BIGINT) as user_id,
+            MAX(created_at) as last_conversation_time,
             COUNT(*) as total_conversations,
-            COUNT(CASE WHEN status <> 'received' THEN 1 END) as total_reply_attempts,
-            COUNT(CASE WHEN status = 'completed' AND ai_response IS NOT NULL AND ai_response != '' THEN 1 END) as successful_replies,
-            COUNT(CASE WHEN status = 'failed' OR (status <> 'received' AND (ai_response IS NULL OR ai_response = '')) THEN 1 END) as failed_replies,
-            AVG(CASE WHEN response_time > 0 THEN response_time ELSE NULL END) as avg_response_time
-          FROM conversations
-          WHERE group_id IS NULL
-          GROUP BY user_id
+            COUNT(*) as total_reply_attempts,
+            COUNT(CASE WHEN status = 'completed' AND no_reply = FALSE AND final_response IS NOT NULL AND final_response != '' THEN 1 END) as successful_replies,
+            COUNT(CASE WHEN status = 'failed' OR (status = 'completed' AND (no_reply = TRUE OR final_response IS NULL OR final_response = '')) THEN 1 END) as failed_replies,
+            AVG(CASE WHEN completed_at IS NOT NULL AND started_at IS NOT NULL THEN EXTRACT(EPOCH FROM (completed_at - started_at)) * 1000 ELSE NULL END) as avg_response_time
+          FROM agent_runs
+          WHERE chat_type = 'direct' AND peer_id ~ '^[0-9]+$'
+          GROUP BY peer_id
         ) stats ON targets.user_id = stats.user_id
         WHERE ${whereClause}
         ORDER BY COALESCE(stats.last_conversation_time, pcs.updated_at, pcs.created_at) DESC, targets.user_id DESC
@@ -475,7 +475,7 @@ export function createChatRoutes(database: DatabaseManager, logger: winston.Logg
         FROM (
           SELECT user_id FROM private_chat_settings
           UNION
-          SELECT DISTINCT user_id FROM conversations WHERE group_id IS NULL
+          SELECT DISTINCT CAST(peer_id AS BIGINT) AS user_id FROM agent_runs WHERE chat_type = 'direct' AND peer_id ~ '^[0-9]+$'
           ${directTriggerTargetsSql}
         ) targets
         LEFT JOIN private_chat_settings pcs ON targets.user_id = pcs.user_id
@@ -500,143 +500,6 @@ export function createChatRoutes(database: DatabaseManager, logger: winston.Logg
       res.status(500).json({
         success: false,
         error: 'Failed to fetch private chat users',
-        message: error instanceof Error ? error.message : 'Unknown error',
-        timestamp: new Date().toISOString()
-      });
-    }
-  });
-
-  // 获取特定用户的私聊详情
-  router.get('/private-chats/:userId', async (req, res) => {
-    try {
-      const userId = parseInt(req.params.userId);
-      const page = Math.max(1, parseInt(req.query.page as string) || 1);
-      const limit = Math.max(1, Math.min(100, parseInt(req.query.limit as string) || 20));
-      const offset = (page - 1) * limit;
-      const search = req.query.search as string || '';
-      const startTime = req.query.startTime as string;
-      const endTime = req.query.endTime as string;
-
-      if (!userId || isNaN(userId)) {
-        return res.status(400).json({
-          success: false,
-          error: 'Invalid user ID',
-          timestamp: new Date().toISOString()
-        });
-      }
-
-      // 构建查询条件
-      let whereConditions = ['c.user_id = ?'];
-      let queryParams: any[] = [userId];
-
-      if (search) {
-        whereConditions.push('(c.user_message LIKE ? OR c.ai_response LIKE ?)');
-        queryParams.push(`%${search}%`, `%${search}%`);
-      }
-
-      if (startTime) {
-        whereConditions.push('c.timestamp >= ?');
-        queryParams.push(serializeTimestampForStorage(startTime) || startTime);
-      }
-
-      if (endTime) {
-        whereConditions.push('c.timestamp <= ?');
-        queryParams.push(serializeTimestampForStorage(endTime) || endTime);
-      }
-
-      const whereClause = whereConditions.join(' AND ');
-
-      // 获取用户设置
-      const userSettingsRows = await database.executeQuery<PrivateChatSettingRow>(`
-        SELECT user_id, username, is_enabled,
-               CASE WHEN is_enabled = 1 THEN 1 ELSE 0 END as auto_reply_enabled,
-               welcome_message, user_notes,
-               transcript_compact_offset, last_activity
-        FROM private_chat_settings
-        WHERE user_id = ?
-      `, [userId]);
-
-      const userSettingRow = userSettingsRows[0];
-      const directForceImTriggerEnabled = parseDirectAgentTriggerUserIds().includes(userId) ? 1 : 0;
-      const baseReceiveEnabled = userSettingRow?.is_enabled ?? 1;
-      const baseAutoReplyEnabled = baseReceiveEnabled === 1 ? 1 : 0;
-      const effectiveAutoReplyEnabled = directForceImTriggerEnabled ? 1 : baseAutoReplyEnabled;
-      const userSettings = {
-        user_id: userId,
-        nickname: userSettingRow?.username || `用户${userId}`,
-        is_enabled: baseReceiveEnabled,
-        auto_reply_enabled: effectiveAutoReplyEnabled,
-        direct_force_im_trigger_enabled: directForceImTriggerEnabled,
-        im_receive_enabled: directForceImTriggerEnabled ? 1 : baseReceiveEnabled,
-        agent_im_entry_enabled: effectiveAutoReplyEnabled,
-        transcript_compact_offset: userSettingRow?.transcript_compact_offset ?? 6,
-        welcome_message: userSettingRow?.welcome_message || null,
-        user_notes: userSettingRow?.user_notes || null,
-        last_activity: userSettingRow?.last_activity || null
-      };
-
-      // 获取今日统计
-      const todayStart = serializeTimestampForStorage(getEast8StartOfDay()) || '1970-01-01 00:00:00.000';
-      const todayStats = await database.executeQuery(`
-        SELECT
-          COUNT(*) as today_conversations,
-          COUNT(CASE WHEN status = 'completed' THEN 1 END) as today_success,
-          COUNT(CASE WHEN status = 'failed' THEN 1 END) as today_failed
-        FROM conversations
-        WHERE user_id = ? AND timestamp >= ?
-      `, [userId, todayStart]);
-
-      // 获取对话列表
-      const conversations = await database.executeQuery(`
-        SELECT
-          c.id as conversation_id,
-          c.trace_id,
-          c.user_message,
-          c.ai_response,
-          c.timestamp,
-          c.response_time,
-          c.status,
-          c.error_reason,
-          c.model_name,
-          c.message_id,
-          c.reply_to_message_id,
-          c.reply_to_text
-        FROM conversations c
-        WHERE ${whereClause}
-        ORDER BY c.timestamp DESC
-        LIMIT ${limit} OFFSET ${offset}
-      `, queryParams);
-
-      // 获取总数
-      const totalResult = await database.executeQuery<{ total: number }>(`
-        SELECT COUNT(*) as total
-        FROM conversations c
-        WHERE ${whereClause}
-      `, queryParams);
-      const total = totalResult[0]?.total || 0;
-
-      res.json({
-        success: true,
-        data: {
-          user_id: userId,
-          user_settings: userSettings,
-          today_stats: todayStats[0] || { today_conversations: 0, today_success: 0, today_failed: 0 },
-          conversations: conversations,
-          pagination: {
-            total,
-            page,
-            limit,
-            totalPages: Math.ceil(total / limit)
-          }
-        },
-        timestamp: new Date().toISOString()
-      });
-
-    } catch (error) {
-      logger.error('Failed to fetch user private chat details', { error, userId: req.params.userId });
-      res.status(500).json({
-        success: false,
-        error: 'Failed to fetch user details',
         message: error instanceof Error ? error.message : 'Unknown error',
         timestamp: new Date().toISOString()
       });
@@ -827,12 +690,6 @@ export function createChatRoutes(database: DatabaseManager, logger: winston.Logg
 
       const placeholders = validIds.map(() => '?').join(',');
 
-      // 删除用户的所有对话记录
-      const conversationsDeleted = await database.executeUpdate(
-        `DELETE FROM conversations WHERE user_id IN (${placeholders})`,
-        validIds
-      );
-
       // 删除用户的私聊设置
       const settingsDeleted = await database.executeUpdate(
         `DELETE FROM private_chat_settings WHERE user_id IN (${placeholders})`,
@@ -841,7 +698,6 @@ export function createChatRoutes(database: DatabaseManager, logger: winston.Logg
 
       logger.info('Batch private chat users deleted', {
         user_ids: validIds,
-        conversationsDeleted,
         settingsDeleted
       });
 
@@ -851,7 +707,6 @@ export function createChatRoutes(database: DatabaseManager, logger: winston.Logg
         data: {
           deleted_count: validIds.length,
           user_ids: validIds,
-          conversations_deleted: conversationsDeleted,
           settings_deleted: settingsDeleted
         },
         timestamp: new Date().toISOString()
@@ -942,9 +797,6 @@ export function createChatRoutes(database: DatabaseManager, logger: winston.Logg
         });
       }
 
-      // 删除用户的所有对话记录
-      await database.executeQuery('DELETE FROM conversations WHERE user_id = ?', [userId]);
-
       // 删除用户的私聊设置
       await database.executeQuery('DELETE FROM private_chat_settings WHERE user_id = ?', [userId]);
 
@@ -962,137 +814,6 @@ export function createChatRoutes(database: DatabaseManager, logger: winston.Logg
       res.status(500).json({
         success: false,
         error: 'Failed to delete user',
-        message: error instanceof Error ? error.message : 'Unknown error',
-        timestamp: new Date().toISOString()
-      });
-    }
-  });
-
-  // 获取特定群聊的详情
-  router.get('/group-chats/:groupId', async (req, res) => {
-    try {
-      const groupId = parseInt(req.params.groupId);
-      const page = Math.max(1, parseInt(req.query.page as string) || 1);
-      const limit = Math.max(1, Math.min(100, parseInt(req.query.limit as string) || 50));
-      const offset = (page - 1) * limit;
-      const search = req.query.search as string || '';
-      const startTime = req.query.startTime as string;
-      const endTime = req.query.endTime as string;
-      const showAll = req.query.showAll === 'true';
-
-      if (!groupId || isNaN(groupId)) {
-        return res.status(400).json({
-          success: false,
-          error: 'Invalid group ID',
-          timestamp: new Date().toISOString()
-        });
-      }
-
-      // 构建查询条件 - 根据group_id字段查询
-      let whereConditions = ['c.group_id = ?'];
-      let queryParams: any[] = [groupId];
-
-      if (search) {
-        whereConditions.push('(c.user_message LIKE ? OR c.ai_response LIKE ?)');
-        queryParams.push(`%${search}%`, `%${search}%`);
-      }
-
-      if (startTime) {
-        whereConditions.push('c.timestamp >= ?');
-        queryParams.push(serializeTimestampForStorage(startTime) || startTime);
-      }
-
-      if (endTime) {
-        whereConditions.push('c.timestamp <= ?');
-        queryParams.push(serializeTimestampForStorage(endTime) || endTime);
-      }
-
-      const whereClause = whereConditions.join(' AND ');
-
-      // 获取群聊设置
-      const groupSettingsRows = await database.executeQuery<GroupChatSettingRow>(`
-        SELECT group_id, group_name, is_enabled,
-               CASE WHEN is_enabled = 1 THEN 1 ELSE 0 END as auto_reply_enabled,
-               welcome_message,
-               transcript_compact_offset, admin_user_id, last_activity
-        FROM group_chat_settings
-        WHERE group_id = ?
-      `, [groupId]);
-
-      const groupSettingsRow = groupSettingsRows[0];
-      const groupReceiveEnabled = groupSettingsRow?.is_enabled ?? 1;
-      const groupAutoReplyEnabled = groupReceiveEnabled === 1 ? 1 : 0;
-      const groupSettings = {
-        group_id: groupId,
-        group_name: groupSettingsRow?.group_name || `群聊${groupId}`,
-        is_enabled: groupReceiveEnabled,
-        auto_reply_enabled: groupAutoReplyEnabled,
-        im_receive_enabled: groupReceiveEnabled,
-        agent_im_entry_enabled: groupReceiveEnabled === 1 && groupAutoReplyEnabled === 1 ? 1 : 0,
-        transcript_compact_offset: groupSettingsRow?.transcript_compact_offset ?? 6,
-        welcome_message: groupSettingsRow?.welcome_message || null,
-        admin_user_id: groupSettingsRow?.admin_user_id || null,
-        last_activity: groupSettingsRow?.last_activity || null
-      };
-
-      // 获取今日统计
-      const todayStart = serializeTimestampForStorage(getEast8StartOfDay()) || '1970-01-01 00:00:00.000';
-      const todayStats = await database.executeQuery(`
-        SELECT
-          COUNT(*) as today_conversations,
-          COUNT(CASE WHEN status = 'completed' THEN 1 END) as today_success,
-          COUNT(CASE WHEN status = 'failed' THEN 1 END) as today_failed
-        FROM conversations
-        WHERE group_id = ? AND timestamp >= ?
-      `, [groupId, todayStart]);
-
-      // 获取对话列表
-      const conversations = await database.executeQuery(`
-        SELECT
-          c.id,
-          c.user_id,
-          c.user_message,
-          c.ai_response,
-          c.timestamp,
-          c.response_time,
-          c.model_name,
-          c.status
-        FROM conversations c
-        WHERE ${whereClause}
-        ORDER BY c.timestamp DESC
-        LIMIT ${limit} OFFSET ${offset}
-      `, queryParams);
-
-      // 获取总数
-      const totalResult = await database.executeQuery<{ total: number }>(`
-        SELECT COUNT(*) as total
-        FROM conversations c
-        WHERE ${whereClause}
-      `, queryParams);
-      const total = totalResult[0]?.total || 0;
-
-      res.json({
-        success: true,
-        data: {
-          group_id: groupId,
-          group_settings: groupSettings,
-          today_stats: todayStats[0] || { today_conversations: 0, today_success: 0, today_failed: 0 },
-          conversations: conversations,
-          pagination: {
-            total,
-            page,
-            limit,
-            totalPages: Math.ceil(total / limit)
-          }
-        },
-        timestamp: new Date().toISOString()
-      });
-
-    } catch (error) {
-      logger.error('Failed to fetch group chat details', { error, groupId: req.params.groupId });
-      res.status(500).json({
-        success: false,
-        error: 'Failed to fetch group details',
         message: error instanceof Error ? error.message : 'Unknown error',
         timestamp: new Date().toISOString()
       });

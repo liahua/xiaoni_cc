@@ -1289,7 +1289,7 @@ export class PlaygroundCaseBuilder {
 
     const prompt = promptId ? await this.loadPrompt(promptId) : null;
     const llmCall = await this.loadLLMCallForTraffic(traffic);
-    const conversation = traffic.conversation_id ? await this.loadConversation(traffic.conversation_id) : null;
+    const conversation = null as ConversationRow | null;
 
     const caseMode: PlaygroundCaseMode = llmCall || conversation ? 'contextual' : 'wire';
     const baselineSnapshot = llmCall ? buildBaselineSnapshot(llmCall, traffic.trace_id || null, null) : null;
@@ -1350,70 +1350,6 @@ export class PlaygroundCaseBuilder {
     return saved;
   }
 
-  async createCaseFromConversation(conversationId: string, promptId?: string | null): Promise<PlaygroundCase> {
-    const conversation = await this.loadConversation(conversationId);
-    if (!conversation) {
-      throw new Error(`Conversation not found: ${conversationId}`);
-    }
-
-    const prompt = promptId ? await this.loadPrompt(promptId) : null;
-    const llmCall = await this.loadLLMCallForConversation(conversation);
-    if (!llmCall?.canonical_request) {
-      throw new PlaygroundCompatibilityError(`Conversation ${conversationId} has no canonical LLM request to import into Playground`);
-    }
-    const baselineSnapshot = buildBaselineSnapshot(llmCall, conversation.trace_id || null, null);
-    const providerConfig = prompt
-      ? buildProviderConfigFromPrompt(prompt)
-      : buildProviderConfigFromBaselineSnapshot(baselineSnapshot, llmCall?.model_provider || null);
-    const promptInput = this.buildPromptInput({
-      prompt,
-      llmCall,
-      conversation,
-      traffic: null
-    });
-
-    const caseRecord: PlaygroundCase = {
-      id: crypto.randomUUID(),
-      name: `Conversation · ${conversation.id}`.slice(0, 255),
-      source: 'conversation',
-      sourceRef: conversation.id,
-      caseMode: 'contextual',
-      traceContext: {
-        traceId: conversation.trace_id || llmCall?.trace_id || null,
-        conversationId: conversation.id,
-        llmCallId: llmCall?.llm_call_id || null,
-        agentTurn: llmCall?.agent_turn ?? null,
-        trafficLogId: null,
-        spanId: null
-      },
-      promptId: prompt?.id || null,
-      promptModeDefault: prompt ? 'saved' : 'draft',
-      promptInput,
-      providerConfig,
-      baselineSnapshot,
-      currentPatch: null,
-      importFidelity: baselineSnapshot.effectiveUnifiedConfig ? 'exact' : 'partial',
-      baselineOutput: this.buildBaselineOutput(null, llmCall, conversation),
-      rawEvidence: {
-        conversation,
-        llmCall
-      },
-      tags: ['conversation', 'contextual'],
-      notes: null,
-      isFavorite: false,
-      createdBy: 'admin',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
-
-    await this.persistCase(caseRecord);
-    const saved = await this.getCaseById(caseRecord.id);
-    if (!saved) {
-      throw new Error('Failed to persist playground case');
-    }
-    return saved;
-  }
-
   async createCaseFromSpan(traceId: string, spanId: string, promptId?: string | null): Promise<PlaygroundCase> {
     const existing = await this.findExistingSpanCase(traceId, spanId);
     const llmCall = await this.loadLLMCallForSpan(traceId, spanId);
@@ -1428,7 +1364,7 @@ export class PlaygroundCaseBuilder {
       throw new PlaygroundCompatibilityError(`Span ${spanId} is missing effective unified config and cannot be replayed exactly`);
     }
 
-    const conversation = llmCall.conversation_id ? await this.loadConversation(llmCall.conversation_id) : null;
+    const conversation = null as ConversationRow | null;
     const providerConfig = buildProviderConfigFromBaselineSnapshot(baselineSnapshot, llmCall.model_provider || null);
     const promptInput = buildPromptInputFromCanonicalRequest(baselineSnapshot.canonicalRequest || {});
 
@@ -1511,36 +1447,6 @@ export class PlaygroundCaseBuilder {
         conversationId: traffic.conversation_id || conversationId,
         spanId: null,
         trafficId: traffic.id
-      };
-    }
-
-    if (conversationId) {
-      const conversation = await this.loadConversation(conversationId);
-      const llmCall = conversation ? await this.loadLLMCallForConversation(conversation) : null;
-      if (conversation && llmCall?.canonical_request) {
-        return {
-          importable: true,
-          sourceType: 'conversation',
-          reasonCode: 'conversation_fallback_available',
-          reasonMessage: 'Falling back to conversation import for Playground',
-          traceId: conversation.trace_id || traceId,
-          conversationId,
-          spanId: null,
-          trafficId: null
-        };
-      }
-
-      return {
-        importable: false,
-        sourceType: 'none',
-        reasonCode: llmCall && !llmCall.canonical_request ? 'missing_canonical_request' : 'no_viable_source',
-        reasonMessage: llmCall && !llmCall.canonical_request
-          ? `Conversation ${conversationId} has no canonical LLM request to import into Playground`
-          : `No viable Playground import source found for conversation ${conversationId}`,
-        traceId: conversation?.trace_id || traceId,
-        conversationId,
-        spanId: null,
-        trafficId: null
       };
     }
 
@@ -1646,7 +1552,7 @@ export class PlaygroundCaseBuilder {
 
     const rows = await this.db.executeQuery<TrafficLogRow>(
       `
-        SELECT id, trace_id, conversation_id, llm_call_id, tool_call_id, agent_turn, method, url, host, path,
+        SELECT id, trace_id, llm_call_id, tool_call_id, agent_turn, method, url, host, path,
                request_headers, request_body, response_body, response_status, request_timestamp, duration_ms,
                api_type, service_name
         FROM http_traffic_logs
@@ -1865,19 +1771,6 @@ export class PlaygroundCaseBuilder {
     return rows[0] || null;
   }
 
-  private async loadConversation(conversationId: string): Promise<ConversationRow | null> {
-    const rows = await this.db.executeQuery<ConversationRow>(
-      `
-        SELECT id, trace_id, user_message, ai_response, raw_request, timestamp,
-               response_time, model_name, status
-        FROM conversations
-        WHERE id = ?
-      `,
-      [conversationId]
-    );
-    return rows[0] || null;
-  }
-
   private llmCallStartedAtValue(row: LLMCallRow | null): number {
     if (!row) {
       return Number.POSITIVE_INFINITY;
@@ -1961,40 +1854,6 @@ export class PlaygroundCaseBuilder {
     ]);
 
     return this.pickEarliestLlmCall([byCallId[0] || null, byTraceId[0] || null, byConversationId[0] || null]);
-  }
-
-  private async loadLLMCallForConversation(conversation: ConversationRow): Promise<LLMCallRow | null> {
-    const tableName = await this.resolveLlmCallTableName();
-    if (!tableName) {
-      return null;
-    }
-
-    const [byTraceId, byConversationId] = await Promise.all([
-      conversation.trace_id
-        ? this.db.executeQuery<LLMCallRow>(
-            `
-          SELECT ${this.llmRequestSliceSelectColumns()}
-          FROM ${tableName}
-          WHERE trace_id = ?
-          ORDER BY started_at ASC, id ASC
-              LIMIT 1
-            `,
-            [conversation.trace_id]
-          )
-        : Promise.resolve([]),
-      this.db.executeQuery<LLMCallRow>(
-        `
-          SELECT ${this.llmRequestSliceSelectColumns()}
-          FROM ${tableName}
-          WHERE conversation_id = ?
-          ORDER BY started_at ASC, id ASC
-          LIMIT 1
-        `,
-        [conversation.id]
-      )
-    ]);
-
-    return this.pickEarliestLlmCall([byTraceId[0] || null, byConversationId[0] || null]);
   }
 
   private async loadLLMCallForSpan(traceId: string, spanId: string): Promise<LLMCallRow | null> {

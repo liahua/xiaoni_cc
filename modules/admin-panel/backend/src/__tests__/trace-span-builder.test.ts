@@ -9,8 +9,6 @@ import {
   getAgentTaskById
 } from '@qq-bot/persistence';
 import {
-  buildConversationTracePayload,
-  buildConversationTraceSpanDetail,
   buildStackTracePayload,
   buildStackTraceSpanDetail,
   buildStackRawProviderTrace
@@ -129,89 +127,6 @@ function createDatabase() {
     }),
   };
 }
-
-describe('buildConversationTracePayload', () => {
-  beforeEach(() => {
-    jest.resetAllMocks();
-    (listRuntimeIdentityActivationTraces as jest.Mock).mockResolvedValue([]);
-    (listIdentityEvidenceRefs as jest.Mock).mockResolvedValue([]);
-    (listTraceTrafficLogs as jest.Mock).mockResolvedValue([]);
-    (listLlmRequestSlices as jest.Mock).mockResolvedValue([{
-      id: '11',
-      sliceId: 'slice-1',
-      llmCallId: 'llm-call-1',
-      traceId: 'trace-1',
-      runId: 'run-1',
-      conversationId: 'conversation-1',
-      agentTurn: 1,
-      createdAt: '2026-03-28T10:00:01.000Z',
-      completedAt: '2026-03-28T10:00:03.000Z',
-      status: 'completed',
-      modelName: 'gpt-5-mini',
-      modelProvider: 'codex',
-      canonicalRequest: { model: 'gpt-5-mini' },
-      wireRequest: { model: 'gpt-5-mini' },
-      canonicalResponse: { output_text: 'hi' },
-      wireResponse: { id: 'resp-1' },
-      rawResponse: { output: [{ type: 'message' }] },
-      outputItems: [{ type: 'message' }],
-      tokenUsage: { input_tokens: 10, output_tokens: 20 },
-      inputStartIndex: 1,
-      inputEndIndex: 2,
-      outputStartIndex: 3,
-      outputEndIndex: 3,
-      requestFormatVersion: 'openresponse/v1',
-      wireProviderFormat: 'codex/responses',
-      processingTimeMs: 2000,
-      metadata: {}
-    }]);
-    (listToolExecutions as jest.Mock).mockResolvedValue([{
-      id: '21',
-      executionId: 'tool:run-1:call-1',
-      llmRequestSliceId: 'slice-1',
-      llmCallId: 'llm-call-1',
-      toolCallId: 'call-1',
-      toolName: 'recover_energy',
-      arguments: { reason: 'done' },
-      rawArguments: '{"reason":"done"}',
-      result: { status_text: 'resting' },
-      status: 'completed',
-      sideEffect: true,
-      traceId: 'trace-1',
-      runId: 'run-1',
-      conversationId: 'conversation-1',
-      agentTurn: 1,
-      startedAt: '2026-03-28T10:00:03.000Z',
-      completedAt: '2026-03-28T10:00:04.000Z',
-      metadata: {}
-    }]);
-    (listAgentStackItems as jest.Mock).mockResolvedValue([{
-      id: '31',
-      eventId: 'stack:item-1',
-      llmRequestSliceId: 'slice-1',
-      itemKind: 'function_call',
-      content: { type: 'function_call', call_id: 'call-1', name: 'recover_energy' },
-      traceId: 'trace-1',
-      runId: 'run-1',
-      conversationId: 'conversation-1',
-      createdAt: '2026-03-28T10:00:02.000Z',
-      metadata: {}
-    }]);
-  });
-
-  it('builds trace spans from llm_request_slices and tool_executions', async () => {
-    const db = createDatabase();
-
-    const payload = await buildConversationTracePayload(db as never, createLogger(), 'conversation-1');
-
-    expect(payload?.spans.some((span) => span.span_id === 'stack-slice:slice-1')).toBe(true);
-    expect(payload?.spans.some((span) => span.span_id === 'tool-call:call-1')).toBe(true);
-    expect(payload?.raw_evidence.llm_request_slices).toHaveLength(1);
-    expect(payload?.raw_evidence.tool_executions).toHaveLength(1);
-    expect(db.executeQuery).not.toHaveBeenCalledWith(expect.stringContaining('llm_call_logs'), expect.anything());
-    expect(db.executeQuery).not.toHaveBeenCalledWith(expect.stringContaining('tool_execution_logs'), expect.anything());
-  });
-});
 
 describe('buildStackTracePayload', () => {
   beforeEach(() => {
@@ -726,25 +641,5 @@ describe('buildStackTracePayload', () => {
     }));
     expect(rawTrace?.response.status_code).toBe(200);
     expect(rawTrace?.response.body).toBe('data: {"type":"response.completed"}');
-  });
-});
-
-describe('buildConversationTraceSpanDetail', () => {
-  it('loads stack slice request and response detail from llm_request_slices', async () => {
-    const detail = await buildConversationTraceSpanDetail(
-      createDatabase() as never,
-      createLogger(),
-      'conversation-1',
-      'stack-slice:slice-1'
-    );
-
-    expect(detail?.input).toMatchObject({
-      canonical_request: { model: 'gpt-5-mini' },
-      wire_request: { model: 'gpt-5-mini' }
-    });
-    expect(detail?.output).toMatchObject({
-      canonical_response: { output_text: 'hi' },
-      wire_response: { id: 'resp-1' }
-    });
   });
 });
