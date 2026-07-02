@@ -34,15 +34,6 @@ export async function createCaseFromTraffic(trafficId: number, promptId?: string
   return parseResponse<PlaygroundCase>(response);
 }
 
-export async function createCaseFromConversation(conversationId: string, promptId?: string | null): Promise<PlaygroundCase> {
-  const response = await fetch(`/api/playground/cases/from-conversation/${conversationId}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(promptId ? { promptId } : {}),
-  });
-  return parseResponse<PlaygroundCase>(response);
-}
-
 export function buildPlaygroundRecoveryUrl(message: string): string {
   const params = new URLSearchParams();
   params.set('importError', message);
@@ -93,10 +84,6 @@ export async function openBestPlaygroundCase(params: {
 
   if (resolution.sourceType === 'traffic' && typeof resolution.trafficId === 'number') {
     return createCaseFromTraffic(resolution.trafficId, params.promptId);
-  }
-
-  if (resolution.sourceType === 'conversation' && resolution.conversationId) {
-    return createCaseFromConversation(resolution.conversationId, params.promptId);
   }
 
   throw new Error(resolution.reasonMessage || 'No viable Playground import source found');

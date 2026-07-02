@@ -37,10 +37,6 @@ const PromptDebugRedirect: React.FC = () => {
   return <Navigate to={`/playground?promptId=${promptId}`} replace />;
 };
 
-const ConversationTimelineRedirect: React.FC = () => {
-  return <Navigate to="/xiaoni-action-stream" replace />;
-};
-
 function RouteFallback() {
   return (
     <div className="flex min-h-[calc(100vh-12rem)] items-center justify-center px-6">
@@ -70,8 +66,6 @@ function App() {
               <Route path="/xiaoni-runtime-settings" element={<XiaoniRuntimeSettingsPage />} />
               <Route path="/xiaoni-activity" element={<Navigate to="/xiaoni-action-stream" replace />} />
               <Route path="/dashboard" element={<Navigate to="/xiaoni-action-stream" replace />} />
-              <Route path="/conversations" element={<Navigate to="/xiaoni-action-stream" replace />} />
-              <Route path="/conversation/:conversationId/timeline" element={<ConversationTimelineRedirect />} />
               <Route path="/xiaoni/action-stream/events/:eventId/trace" element={<Navigate to="/xiaoni-action-stream" replace />} />
               <Route path="/groups" element={<GroupManagementPage />} />
               <Route path="/groups/:groupId" element={<Navigate to="/groups" replace />} />

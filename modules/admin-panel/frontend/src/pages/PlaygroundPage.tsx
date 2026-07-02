@@ -36,7 +36,6 @@ import { formatConfiguredValue, formatReturnedValue } from '@/lib/contract-displ
 import { cn, formatTimestamp } from '@/lib/utils';
 import {
   clonePlaygroundRun,
-  createCaseFromConversation,
   createCaseFromTraffic,
   createPlaygroundRun,
   fetchPlaygroundCase,
@@ -423,22 +422,6 @@ export function PlaygroundPage() {
     },
   });
 
-  const createFromConversationMutation = useMutation({
-    mutationFn: (conversationId: string) => createCaseFromConversation(conversationId, promptId),
-    onMutate: () => {
-      setLibraryActionError(null);
-    },
-    onSuccess: (record) => {
-      setSelectedCaseId(record.id);
-      setLibraryOpen(false);
-      setLibraryActionError(null);
-      queryClient.invalidateQueries({ queryKey: ['playground-library'] });
-    },
-    onError: (error) => {
-      setLibraryActionError(error instanceof Error ? error.message : '无法从该 conversation 创建 Playground Case');
-    },
-  });
-
   const updateCaseMutation = useMutation({
     mutationFn: (payload: Partial<PlaygroundCase>) => updatePlaygroundCase(selectedCaseId!, payload),
     onSuccess: (record) => {
@@ -514,8 +497,6 @@ export function PlaygroundPage() {
 
     const caseId = searchParams.get('caseId');
     const trafficId = searchParams.get('trafficId');
-    const conversationId = searchParams.get('conversationId');
-    const importError = searchParams.get('importError');
     if (caseId) {
       bootstrappedRef.current = true;
       setSelectedCaseId(caseId);
@@ -527,12 +508,7 @@ export function PlaygroundPage() {
       createFromTrafficMutation.mutate(Number(trafficId));
       return;
     }
-
-    if (conversationId && !importError) {
-      bootstrappedRef.current = true;
-      createFromConversationMutation.mutate(conversationId);
-    }
-  }, [createFromConversationMutation, createFromTrafficMutation, searchParams]);
+  }, [createFromTrafficMutation, searchParams]);
 
   useEffect(() => {
     const currentCase = selectedCaseQuery.data;
@@ -625,7 +601,7 @@ export function PlaygroundPage() {
 
   const currentPromptText =
     promptMode === 'draft' ? draftSystemInstruction : promptInput.systemInstruction;
-  const isImportingCase = createFromTrafficMutation.isPending || createFromConversationMutation.isPending;
+  const isImportingCase = createFromTrafficMutation.isPending;
   const isCaseReady = Boolean(selectedCaseId);
   const isDraftOnly = !isCaseReady && (editorEmptyStateDismissed || currentPromptText.trim().length > 0);
   const showStartupState = !isCaseReady && !isDraftOnly;
