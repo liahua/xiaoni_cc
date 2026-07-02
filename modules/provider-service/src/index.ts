@@ -11,7 +11,7 @@ import {
   ensureTopicLabSchema,
   upsertAgentMediaAssets,
 } from '@qq-bot/persistence';
-import { aiConfig, inboundLivenessConfig, selfEvolutionConfig, serverConfig, topicProjectionConfig } from './config';
+import { aiConfig, inboundLivenessConfig, selfEvolutionConfig, serverConfig } from './config';
 import { evaluateInboundLiveness } from './services/inbound-liveness';
 import EmbeddingService from './services/embedding-service';
 import { executeAgentRequest, executeDebugRequest } from './services/provider-debug-service';
@@ -25,14 +25,9 @@ import {
   rememberInboundContext,
 } from './services/agent-im-input-adapter';
 import { InboundInboxService } from './services/inbound-inbox-service';
-import { ConversationStoreService } from './services/conversation-store-service';
-import { SessionTranscriptService } from './services/session-transcript-service';
-import { TranscriptSnapshotService } from './services/transcript-snapshot-service';
 import RelationshipLedgerService from './services/relationship-ledger-service';
 import SelfEvolutionExecutorService from './services/self-evolution-executor-service';
 import { SelfEvolutionService } from './services/self-evolution-service';
-import TopicProjectionService from './services/topic-projection-service';
-import TopicProjectionExecutorService from './services/topic-projection-executor-service';
 import TopicReviewMaterializationService from './services/topic-review-materialization-service';
 import { GroupParticipationService } from './services/group-participation-service';
 import { ImagePromptAssistantService, ImageProviderError, OpenAIImageProvider } from './services/image-provider';
@@ -85,8 +80,6 @@ const inboxService = new InboundInboxService();
 const chatPolicyService = new ChatPolicyService();
 const recentMessageCache = new RecentMessageCache();
 const groupParticipationService = new GroupParticipationService({ embeddingService });
-const conversationStoreService = new ConversationStoreService();
-const transcriptSnapshotService = new TranscriptSnapshotService();
 const GROUP_INFO_CACHE_TTL_MS = Number(process.env.NAPCAT_GROUP_INFO_CACHE_TTL_MS || 10 * 60 * 1000);
 const groupNameCache = new Map<number, { name: string; expiresAt: number }>();
 let groupNotificationAggregationFlushTimer: ReturnType<typeof setInterval> | null = null;
@@ -217,27 +210,7 @@ const selfEvolutionService = new SelfEvolutionService({
 const selfEvolutionExecutorService = new SelfEvolutionExecutorService({
   modelName: selfEvolutionConfig.modelName
 });
-const topicProjectionService = new TopicProjectionService({
-  enabled: topicProjectionConfig.enabled,
-  webhookUrl: topicProjectionConfig.webhookUrl,
-  minNewTurns: topicProjectionConfig.minNewTurns,
-  minNewLedgerEvents: topicProjectionConfig.minNewLedgerEvents,
-  modelName: aiConfig.model_name
-});
-const topicProjectionExecutorService = new TopicProjectionExecutorService({
-  modelName: aiConfig.model_name
-});
 const topicReviewMaterializationService = new TopicReviewMaterializationService();
-const transcriptService = new SessionTranscriptService({
-  conversationStore: conversationStoreService,
-  snapshotService: transcriptSnapshotService,
-  systemPrompt: process.env.CHATBOT_SYSTEM_PROMPT || [
-    'You are a QQ chat bot.',
-    'Reply naturally, directly, and briefly in Chinese by default.',
-    'In group chats, keep responses short unless the user explicitly asks for detail.'
-  ].join('\n'),
-  summaryWebhookUrl: process.env.TRANSCRIPT_SUMMARY_WEBHOOK_URL || undefined
-});
 
 function parseImageDataUrl(value: string) {
   const match = /^data:(image\/(?:png|jpeg|jpg|webp|gif));base64,([A-Za-z0-9+/=\s]+)$/i.exec(value.trim());
@@ -869,33 +842,6 @@ function recordRelationshipLedgerAsync(inboundContext: FinalizedInboundContext, 
 
 function isInboxOnlyInboundMessage(_message: { chatType: 'direct' | 'group'; wasMentioned: boolean; senderId: string }) {
   return false;
-}
-
-async function materializeContinuousLearningTurn(params: {
-  inboundContext: FinalizedInboundContext;
-  currentMessageId?: number | null;
-  traceId: string;
-}) {
-  const targets = inferPolicyTargets(params.inboundContext);
-  if (!targets) {
-    return false;
-  }
-
-  await conversationStoreService.materializeInboundConversation({
-    userId: targets.userId,
-    groupId: targets.groupId,
-    userMessage: params.inboundContext.BodyForAgent || params.inboundContext.Body || '',
-    traceId: params.traceId,
-    sourceMessageId: params.currentMessageId ?? null,
-    sourceMessageSid: params.inboundContext.MessageSid || null,
-    rawRequest: {
-      session_key: params.inboundContext.SessionKey,
-      chat_type: params.inboundContext.ChatType,
-      sender_id: params.inboundContext.SenderId,
-      sender_name: params.inboundContext.SenderName || null
-    }
-  });
-  return true;
 }
 
 async function runContinuousLearningIfEnabled(params: {
@@ -2544,8 +2490,6 @@ async function startServer() {
   await ensureTopicLabSchema();
   await ensureAgentMediaSchema();
   await inboxService.initialize();
-  await conversationStoreService.initialize();
-  await transcriptSnapshotService.initialize();
   await runtimeStoreService.initialize();
   startGroupNotificationAggregationFlushLoop();
 
@@ -2616,16 +2560,6 @@ async function shutdown(signal: string) {
   }
   await inboxService.close().catch((error) => {
     moduleLogger.warn('Failed to close inbox service cleanly', {
-      error: error instanceof Error ? error.message : String(error)
-    });
-  });
-  await conversationStoreService.close().catch((error) => {
-    moduleLogger.warn('Failed to close conversation store cleanly', {
-      error: error instanceof Error ? error.message : String(error)
-    });
-  });
-  await transcriptSnapshotService.close().catch((error) => {
-    moduleLogger.warn('Failed to close transcript snapshot service cleanly', {
       error: error instanceof Error ? error.message : String(error)
     });
   });
