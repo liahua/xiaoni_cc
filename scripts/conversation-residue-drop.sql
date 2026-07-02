@@ -1,0 +1,101 @@
+-- =====================================================================
+-- conversation 残留 schema-drop 脚本（提案稿 / 全删版）
+-- =====================================================================
+-- ⚠️ 不要直接执行。这是给 user 审阅的提案，确认后再分段手动跑。
+--
+-- 前置代码改动（branch chore/remove-conversation-residue）已完成:
+--   停写(provider+agent) + admin 统计改挂 agent_runs + trace 视图全走栈原生 +
+--   删死 debug/conversation 端点 + 拆 playground conversation 源 + log-routes 去 conversation_id。
+-- 实测: 全仓 conversations 表 0 执行读写; conversation_id 列 0 ungated(执行态)读。
+-- 仅剩 3 处 DORMANT gated 引用(playground-case-builder 1509/1545/1847)——gated 在
+--   现已恒 null 的条件上, 永不执行, 列删掉后这些字符串保持休眠, 不报错。
+--
+-- 库: 主栈 PostgreSQL(worktree 也连主工作区主栈 DB)。
+-- 执行前务必 pg_dump 备份。每段单独事务、单独确认。不部署由 user 决定。
+-- =====================================================================
+
+-- ---------------------------------------------------------------------
+-- 前置条件复查(执行前跑一遍确认)
+-- ---------------------------------------------------------------------
+-- 1) 新流量下 conversations 无新增行:
+--      SELECT max(id), max(timestamp) FROM conversations;  -- 部署后应停增
+-- 2) 新 trace 的账本 conversation_id 恒 NULL:
+--      SELECT count(*) FROM agent_stack_items WHERE conversation_id IS NOT NULL AND created_at > now() - interval '1 day';
+-- 3) 代码已部署(本脚本删列/表后, 旧镜像若还在跑会因 dormant SQL 执行而报错——
+--    确认 agent-service/admin-backend/provider 都已是本分支镜像再删)。
+
+-- =====================================================================
+-- 段 1: DROP 两张 conversation 表
+-- =====================================================================
+-- conversations: 老 QQ-bot user_message/ai_response 记录。0 读者(trace/playground/debug 已改挂/删)。
+-- conversation_items: 以 conversation_id 为 NOT NULL 结构键的子项表, conversations 的附属。
+--   agent live 路径 0 读 conversation_items(replay 走 agent_stack_items)。整表删。
+-- DROP TABLE IF EXISTS conversation_items;
+-- DROP TABLE IF EXISTS conversations;
+
+-- =====================================================================
+-- 段 2: 删账本表的 conversation_id 列(现 0 写入, attachConversationIdToTrace 已删)
+-- =====================================================================
+-- ALTER TABLE agent_queue_messages                         DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE agent_runs                                   DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE agent_message_batches                        DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE llm_jobs                                     DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE timeline_events                              DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE agent_stack_items                            DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE llm_request_slices                           DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE tool_executions                              DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE codex_provider_usage_events                  DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE agent_life_events                            DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE agent_recovery_sessions                      DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE identity_evidence_refs                       DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE runtime_identity_activation_traces           DROP COLUMN IF EXISTS conversation_id;
+-- -- fork 账本:
+-- ALTER TABLE core_memory_compression_fork_runs            DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE core_memory_compression_fork_items           DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE core_memory_compression_fork_slices          DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE core_memory_compression_fork_tool_executions DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE subconscious_agent_fork_runs                 DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE subconscious_agent_fork_items                DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE subconscious_agent_fork_slices               DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE subconscious_agent_fork_tool_executions      DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE cache_heartbeat_fork_items                   DROP COLUMN IF EXISTS conversation_id;
+-- -- memory 投影表:
+-- ALTER TABLE agent_feedback_episodes                      DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE agent_feedback_reflections                   DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE agent_memory_observations                    DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE agent_memory_assertions                      DROP COLUMN IF EXISTS conversation_id;
+-- ALTER TABLE agent_memory_reflections                     DROP COLUMN IF EXISTS conversation_id;
+
+-- =====================================================================
+-- 段 3: http_traffic_logs.conversation_id(不再承重, observability 已改按 trace_id/run_id)
+-- =====================================================================
+-- 其上索引 idx_conversation_request_time_id 先删。
+-- DROP INDEX IF EXISTS idx_conversation_request_time_id;
+-- ALTER TABLE http_traffic_logs DROP COLUMN IF EXISTS conversation_id;
+
+-- =====================================================================
+-- 段 4: 旧 cutoff 列(已迁 stack_index) + memory context 的 source_conversation_id
+-- =====================================================================
+-- ALTER TABLE agent_session_context_windows     DROP COLUMN IF EXISTS read_cutoff_after_conversation_id;
+-- ALTER TABLE agent_session_context_windows     DROP COLUMN IF EXISTS previous_read_cutoff_after_conversation_id;
+-- ALTER TABLE core_memory_compression_fork_runs DROP COLUMN IF EXISTS read_cutoff_after_conversation_id;
+-- ALTER TABLE core_memory_compression_fork_runs DROP COLUMN IF EXISTS previous_read_cutoff_after_conversation_id;
+-- -- source_conversation_id(5 处, grep packages/persistence/prisma/schema.prisma 逐一确认表名):
+-- --   agent_memory_observation_contexts / agent_memory_assertion_contexts /
+-- --   topic_projection_version_snapshots / topic_projection_executions / http_log_reference_captures 等
+-- ALTER TABLE <table> DROP COLUMN IF EXISTS source_conversation_id;
+
+-- =====================================================================
+-- 收尾(代码, 删列后同步, 与本 SQL 一起 review):
+-- =====================================================================
+-- A) packages/persistence/prisma/schema.prisma: 删所有 model 的 conversation_id /
+--    source_conversation_id / read_cutoff_after_conversation_id 字段; 删 ConversationItem model。
+-- B) raw-DDL 同步删列: packages/persistence/agent-runtime.js + xiaoni-agent-stack.js 的
+--    CREATE TABLE 里对应 conversation_id 列(否则新环境 ensureSchema 会重建出该列, schema 漂移)。
+-- C) 删已死的持久化函数(现无 live 调用): createConversationWithItems / createStoredConversation /
+--    listStoredConversationTurns / attachConversationIdToRuntimeTrace /
+--    attachConversationIdToAgentStackByTrace / loadSessionReplayState(agent-runtime.js/xiaoni-agent-stack.js)。
+-- D) playground-case-builder 3 处 dormant gated conversation_id 引用(1509/1545/1847)顺手清:
+--    findExactImportableSpan/findTrafficFallback 去掉 conversationId 参数与 clause;
+--    loadLLMCallForTraffic 去掉 traffic.conversation_id 分支。
+-- E) 各服务 tsc/build + docker build/up + ps healthy(部署时机由 user 定)。
