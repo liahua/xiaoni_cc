@@ -38,6 +38,8 @@ async function sendWith(opts: {
   const service = new QqSendImageService({
     runtimeRoot,
     allowedRoots: [runtimeRoot],
+    // 这组用例专测「webp 开启时」的编码器行为,显式打开总开关(生产默认关 = 发原图 PNG,见下方 default-off 用例)。
+    webpEnabled: true,
     logImageSend: (message, fields) => { logs.push({ message, fields }); },
     webpEncoder: async (input: Buffer, mode: WebpEncodeMode) => {
       encoderCalls.push({ mode, inputLen: input.length });
@@ -172,5 +174,71 @@ test('skip already-webp: passthrough, encoder not called', async () => {
     assert.deepEqual(wire.bytes, webpSrc);
   } finally {
     await fs.rm(h.runtimeRoot, { recursive: true, force: true });
+  }
+});
+
+// 回归钉:webp 总开关默认关(生产态)。用户 2026-07-04 定 QQ 统一收 PNG(PNG→webp 后部分 QQ 客户端
+// 不渲染收到的 webp)。默认必须原图 PNG 上线,编码器绝不被调用。
+test('webp disabled by default: PNG passthrough, encoder NOT called, wire=original PNG', async () => {
+  const runtimeRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'qqimg-webp-off-'));
+  const srcDir = path.join(runtimeRoot, 'gen');
+  await fs.mkdir(srcDir, { recursive: true });
+  const png = Buffer.concat([PNG_SIG, Buffer.alloc(1024, 7)]);
+  const srcPath = path.join(srcDir, 'sent.png');
+  await fs.writeFile(srcPath, png);
+
+  let encoderCalled = false;
+  let postedDataUrl: string | null = null;
+  const service = new QqSendImageService({
+    runtimeRoot,
+    allowedRoots: [runtimeRoot],
+    // webpEnabled 缺省 → 走环境变量,测试环境未设 → 关。绝不注入 webpEnabled。
+    webpEncoder: async () => { encoderCalled = true; return Buffer.from('SHOULD-NOT-RUN'); },
+    fetchImpl: (async (_url: string, init: { body: string }) => {
+      const body = JSON.parse(init.body) as { data_url?: string };
+      postedDataUrl = typeof body.data_url === 'string' ? body.data_url : null;
+      return { ok: true, text: async () => JSON.stringify({ success: true, data: { message_id: 7 } }) };
+    }) as any
+  });
+
+  try {
+    const result = await service.sendPrivate({ user_id: 85178516, image_path: srcPath });
+    assert.equal(encoderCalled, false, '默认关:编码器绝不被调用');
+    const wire = decodeDataUrl(postedDataUrl!);
+    assert.equal(wire.mime, 'image/png', '默认关:wire = 原图 PNG,不是 webp');
+    assert.deepEqual(wire.bytes, png, 'wire 字节 = 原图逐字节');
+    assert.equal(result.mime_type, 'image/png');
+  } finally {
+    await fs.rm(runtimeRoot, { recursive: true, force: true });
+  }
+});
+
+// 环境变量/选项显式打开时仍能转码(保留能力,不是删死)。
+test('webp enabled via option: PNG transcodes to webp (capability retained)', async () => {
+  const runtimeRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'qqimg-webp-on-'));
+  const srcDir = path.join(runtimeRoot, 'gen');
+  await fs.mkdir(srcDir, { recursive: true });
+  const png = Buffer.concat([PNG_SIG, Buffer.alloc(1024, 7)]);
+  const srcPath = path.join(srcDir, 'sent.png');
+  await fs.writeFile(srcPath, png);
+
+  let postedDataUrl: string | null = null;
+  const service = new QqSendImageService({
+    runtimeRoot,
+    allowedRoots: [runtimeRoot],
+    webpEnabled: true,
+    webpEncoder: async () => Buffer.from('SMALL-WEBP', 'ascii'),
+    fetchImpl: (async (_url: string, init: { body: string }) => {
+      const body = JSON.parse(init.body) as { data_url?: string };
+      postedDataUrl = typeof body.data_url === 'string' ? body.data_url : null;
+      return { ok: true, text: async () => JSON.stringify({ success: true, data: { message_id: 7 } }) };
+    }) as any
+  });
+
+  try {
+    await service.sendPrivate({ user_id: 85178516, image_path: srcPath });
+    assert.equal(decodeDataUrl(postedDataUrl!).mime, 'image/webp', '显式开启 → wire = webp');
+  } finally {
+    await fs.rm(runtimeRoot, { recursive: true, force: true });
   }
 });

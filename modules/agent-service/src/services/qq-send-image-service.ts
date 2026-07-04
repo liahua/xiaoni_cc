@@ -92,9 +92,19 @@ export type QqSendImageServiceOptions = {
   maxBytes?: number;
   fetchImpl?: FetchLike;
   webpEncoder?: WebpEncoder;
+  // 出站 webp 转码总开关,默认关 = wire 走原图 PNG/JPEG。用户 2026-07-04 定:QQ 最终收到的统一是 PNG,
+  // 省流量的转码交给工程内部消化、小腻侧无感(她图源本就是 PNG,停转码即发 PNG,零额外解码)。
+  // 缘由:PNG→webp 后部分 QQ 客户端(PC/桌面端)不渲染收到的 webp(手机端能),为省沟通成本统一 PNG。
+  // 保留编码器代码,想开只翻环境变量 XIAONI_SEND_IMAGE_WEBP。
+  webpEnabled?: boolean;
   // 每次发送记一行:源→wire 字节、压了还是回退。关闭「静默回退」盲点(默认 no-op，测试静默)。
   logImageSend?: (message: string, fields: Record<string, unknown>) => void;
 };
+
+// 只有显式 1/true/on/yes 才开启;缺省、空串、其它一律关(默认发原图 PNG)。
+function parseWebpEnabledEnv(value: string | undefined): boolean {
+  return /^(1|true|on|yes)$/i.test((value ?? '').trim());
+}
 
 type SendMode = 'private' | 'group';
 
@@ -292,6 +302,7 @@ export class QqSendImageService {
   private readonly maxBytes: number;
   private readonly fetchImpl: FetchLike;
   private readonly webpEncoder: WebpEncoder;
+  private readonly webpEnabled: boolean;
   private readonly logImageSend: (message: string, fields: Record<string, unknown>) => void;
 
   constructor(options: QqSendImageServiceOptions = {}) {
@@ -302,12 +313,17 @@ export class QqSendImageService {
     this.maxBytes = options.maxBytes || Number.parseInt(process.env.QQ_SEND_IMAGE_MAX_BYTES || '', 10) || DEFAULT_MAX_BYTES;
     this.fetchImpl = options.fetchImpl || fetch;
     this.webpEncoder = options.webpEncoder || defaultCwebpEncoder;
+    this.webpEnabled = options.webpEnabled ?? parseWebpEnabledEnv(process.env.XIAONI_SEND_IMAGE_WEBP);
     this.logImageSend = options.logImageSend || (() => {});
   }
 
   // 只转 wire 那一份:PNG→无损 webp、JPEG→有损 q80;GIF(可能动图)/已 webp/其它一律原样。
   // 编码失败、转完更大、返回空 —— 全部回退原图。绝不改动传入 data(调用方仍用原图归档)。
   private async toWireImage(data: Buffer, mimeType: string): Promise<{ data: Buffer; mimeType: string }> {
+    // 总开关关闭(默认) → 原图上线,绝不转 webp。QQ 统一收 PNG,小腻侧无感(见 options.webpEnabled 注释)。
+    if (!this.webpEnabled) {
+      return { data, mimeType };
+    }
     let mode: WebpEncodeMode;
     if (mimeType === 'image/png') {
       mode = 'lossless';
